@@ -1,0 +1,14 @@
+{
+  "name": "ai-devops-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI-powered DevOps agent platform",
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev:api": "npm --workspace=apps/api run dev",
+    "dev:web": "npm --workspace=apps/web run dev",
+    "build": "npm --workspaces run build"
+  }
+}

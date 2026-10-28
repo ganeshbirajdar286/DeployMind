@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+{% for service in services %}
+  {{ service.name }}:
+    build:
+      context: {{ service.path }}
+      dockerfile: Dockerfile
+    container_name: {{ repo_name }}-{{ service.name }}
+    restart: unless-stopped
+    ports:
+      - "{{ service.default_port }}:{{ service.default_port }}"
+    environment:
+      - PORT={{ service.default_port }}
+{% if service.env_vars_detected %}
+    env_file:
+      - {{ service.path }}/.env
+{% endif %}
+{% endfor %}

@@ -1,0 +1,58 @@
+# ==========================================
+# Stage 1: Build & Dependencies
+# ==========================================
+FROM node:{{ runtime_version | default('20') }}-alpine AS builder
+
+WORKDIR /app
+
+{% if package_manager == 'pnpm' %}
+RUN corepack enable && corepack prepare pnpm@latest --activate
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install
+{% elif package_manager == 'yarn' %}
+COPY package.json yarn.lock ./
+RUN yarn install
+{% else %}
+COPY package*.json ./
+RUN npm install
+{% endif %}
+
+COPY . .
+
+{% if build_command %}
+# Compile TypeScript or run build script
+RUN {{ build_command }}
+{% endif %}
+
+# Prune dev dependencies for production image
+{% if package_manager == 'pnpm' %}
+RUN pnpm prune --prod
+{% elif package_manager == 'yarn' %}
+RUN yarn install --production --ignore-scripts --prefer-offline
+{% else %}
+RUN npm prune --production
+{% endif %}
+
+# ==========================================
+# Stage 2: Production Minimal Runner
+# ==========================================
+FROM node:{{ runtime_version | default('20') }}-alpine AS runner
+
+WORKDIR /app
+ENV NODE_ENV=production
+ENV PORT={{ default_port | default(3000) }}
+
+# Run as non-root built-in node user
+USER node
+
+COPY --chown=node:node --from=builder /app/package.json ./package.json
+COPY --chown=node:node --from=builder /app/node_modules ./node_modules
+{% if output_dir %}
+COPY --chown=node:node --from=builder /app/{{ output_dir }} ./{{ output_dir }}
+{% else %}
+COPY --chown=node:node --from=builder /app ./
+{% endif %}
+
+EXPOSE {{ default_port | default(3000) }}
+
+CMD {{ start_command | default('node index.js') | to_json }}

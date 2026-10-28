@@ -1,0 +1,21 @@
+[project]
+name = "agent-engine"
+version = "0.1.0"
+description = "Deterministic repository analyzer and AI DevOps configuration engine"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "jinja2>=3.1.5",
+    "pydantic>=2.10.0",
+    "pytest>=8.3.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
