@@ -28,7 +28,7 @@ class GitHubActionsRunner:
         """Downloads full raw text log of a completed GitHub Actions job."""
         url = f"{self.base_url}/repos/{repo}/actions/jobs/{job_id}/logs"
         try:
-            resp = requests.get(url, headers=self._headers(), allow_redirects=True, timeout=20)
+            resp = requests.get(url, headers=self._headers(), allow_redirects=True, timeout=25)
             if resp.status_code == 200:
                 return resp.text
         except Exception:
@@ -173,23 +173,38 @@ class GitHubActionsRunner:
                 if job.get("conclusion") == "failure":
                     raw_log = self.get_job_raw_logs(repo, job.get("id"))
                     if raw_log:
-                        # Extract the container logs section if present
-                        if "=== Container Logs ===" in raw_log:
+                        # Extract container logs using explicit delimiters or fallback
+                        if "--- BEGIN RAW CONTAINER LOGS ---" in raw_log:
+                            parts = raw_log.split("--- BEGIN RAW CONTAINER LOGS ---")
+                            last_part = parts[-1]
+                            if "--- END RAW CONTAINER LOGS ---" in last_part:
+                                container_logs = last_part.split("--- END RAW CONTAINER LOGS ---")[0].strip()
+                            else:
+                                container_logs = last_part.strip()
+                        elif "=== Container Logs ===" in raw_log:
                             parts = raw_log.split("=== Container Logs ===")
-                            if len(parts) > 1:
-                                container_section = parts[1].split("=== 5. Cleaning Up")[0]
-                                container_logs = container_section.strip()
-                        elif "Traceback" in raw_log or "Error" in raw_log:
-                            container_logs = raw_log[-2000:].strip()
+                            last_part = parts[-1]
+                            container_logs = last_part.split("=== 5. Cleaning Up")[0].strip()
+                        elif "Traceback" in raw_log:
+                            tb_idx = raw_log.rfind("Traceback")
+                            container_logs = raw_log[tb_idx:].split("##[endgroup]")[0].strip()
 
+                        # Clean timestamps from each line
+                        cleaned_lines = []
                         if container_logs:
+                            for raw_line in container_logs.splitlines():
+                                cleaned = re.sub(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z\s*", "", raw_line).rstrip()
+                                if cleaned and not cleaned.startswith("##["):
+                                    cleaned_lines.append(cleaned)
+
+                        if cleaned_lines:
                             logs.append("\n" + "=" * 60)
                             logs.append("📦 LIVE CONTAINER RUNTIME LOGS (from Cloud Sandbox):")
                             logs.append("=" * 60)
-                            for cl in container_logs.splitlines()[:50]:
+                            for cl in cleaned_lines[:60]:
                                 logs.append(f"  | {cl}")
                             logs.append("=" * 60)
-                            error_tail = container_logs
+                            error_tail = "\n".join(cleaned_lines)
         except Exception as e:
             logs.append(f"Error fetching detailed logs: {e}")
 

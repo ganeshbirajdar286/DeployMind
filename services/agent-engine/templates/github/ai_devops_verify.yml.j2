@@ -67,8 +67,9 @@ jobs:
               sleep 3
             done
             echo "Healthcheck probe FAILED: service did not respond within 60 seconds."
-            echo "=== Container Logs ==="
-            docker compose logs
+            echo "--- BEGIN RAW CONTAINER LOGS ---"
+            docker compose logs --no-color --tail=100
+            echo "--- END RAW CONTAINER LOGS ---"
             exit 1
           fi
           {% endraw %}
