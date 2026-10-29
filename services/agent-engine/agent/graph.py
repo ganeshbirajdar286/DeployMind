@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Literal, Optional
 from langgraph.graph import StateGraph, END
 from .state import AgentState
 from .nodes import (
@@ -79,8 +79,12 @@ def run_devops_workflow(
     repo_path: str,
     max_retries: int = 2,
     job_id: str = None,
+    sandbox_mode: str = "auto",
+    github_repo: Optional[str] = None,
+    github_token: Optional[str] = None,
+    github_branch: Optional[str] = "main",
 ) -> AgentState:
-    """Executes the complete AI DevOps workflow synchronously."""
+    """Executes the complete AI DevOps workflow synchronously with optional Cloud Sandbox."""
     initial_state: AgentState = {
         "repo_path": repo_path,
         "analysis": None,
@@ -96,6 +100,10 @@ def run_devops_workflow(
         "patch_history": [],
         "status_message": "Starting AI DevOps Agent...",
         "job_id": job_id,
+        "sandbox_mode": sandbox_mode,
+        "github_repo": github_repo,
+        "github_token": github_token,
+        "github_branch": github_branch,
     }
 
     final_state = devops_agent_app.invoke(initial_state)

@@ -6,6 +6,7 @@ from typing import Dict, Any, List
 from analyzer.detector import analyze_repository
 from generator.engine import generate_devops_bundle
 from runner.docker_runner import DockerRunner
+from runner.github_runner import GitHubActionsRunner
 from .state import AgentState, PatchRecord
 from .patcher import diagnose_and_patch
 
@@ -69,7 +70,7 @@ def validate_build_node(state: AgentState) -> Dict[str, Any]:
 
 
 def validate_compose_node(state: AgentState) -> Dict[str, Any]:
-    """Node 3: Validates docker-compose.yml: boots containers, probes ports, and tears down."""
+    """Node 3: Validates Compose via Local Docker or Cloud GitHub Actions Sandbox."""
     repo_path = Path(state["repo_path"]).resolve()
     artifacts = state.get("artifacts", {})
     compose_content = artifacts.get("docker-compose.yml")
@@ -82,39 +83,54 @@ def validate_compose_node(state: AgentState) -> Dict[str, Any]:
             "status_message": "No docker-compose.yml found.",
         }
 
-    # Extract exposed ports to probe
+    # Extract primary port & health check path
+    primary_port = 8080
+    primary_health_path = "/"
     ports_to_probe: List[int] = []
+
     analysis = state.get("analysis")
-    if analysis and "services" in analysis:
+    if analysis and "services" in analysis and analysis["services"]:
+        primary_svc = analysis["services"][0]
+        primary_port = primary_svc.get("default_port", 8080)
+        primary_health_path = primary_svc.get("health_check_path", "/")
+
         for svc in analysis["services"]:
-            port = svc.get("default_port")
-            if port and isinstance(port, int):
-                ports_to_probe.append(port)
+            p = svc.get("default_port")
+            if p and isinstance(p, int):
+                ports_to_probe.append(p)
 
-    runner = DockerRunner()
-
-    with tempfile.TemporaryDirectory() as temp_dir:
-        temp_path = Path(temp_dir)
-        # Write docker-compose.yml
-        temp_compose = temp_path / "docker-compose.yml"
-        temp_compose.write_text(compose_content, encoding="utf-8")
-
-        # Also write the Dockerfile into context so compose can find it
-        dockerfile_content = artifacts.get("Dockerfile")
-        if dockerfile_content:
-            (temp_path / "Dockerfile").write_text(dockerfile_content, encoding="utf-8")
-
-        result = runner.validate_compose(
-            compose_file_path=temp_compose,
-            ports_to_probe=ports_to_probe,
+    # Route to GitHub Actions Sandbox if configured
+    if state.get("sandbox_mode") == "github" or state.get("github_repo"):
+        gh_runner = GitHubActionsRunner(token=state.get("github_token"))
+        result = gh_runner.dispatch_and_wait(
+            repo=state.get("github_repo", ""),
+            branch=state.get("github_branch", "main"),
+            health_port=primary_port,
+            health_path=primary_health_path,
         )
+    else:
+        # Local Docker / Pre-Flight mode
+        runner = DockerRunner()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            temp_compose = temp_path / "docker-compose.yml"
+            temp_compose.write_text(compose_content, encoding="utf-8")
+
+            dockerfile_content = artifacts.get("Dockerfile")
+            if dockerfile_content:
+                (temp_path / "Dockerfile").write_text(dockerfile_content, encoding="utf-8")
+
+            result = runner.validate_compose(
+                compose_file_path=temp_compose,
+                ports_to_probe=ports_to_probe,
+            )
 
     if result.success:
         return {
             "compose_succeeded": True,
             "current_stage": "SUCCESS",
             "compose_logs": result.logs,
-            "status_message": f"All validations PASSED: Dockerfile & Docker Compose verified! ({result.status_summary})",
+            "status_message": f"Verification PASSED: {result.status_summary}",
         }
     else:
         return {
@@ -122,7 +138,7 @@ def validate_compose_node(state: AgentState) -> Dict[str, Any]:
             "current_stage": "REPAIRING" if state.get("retry_count", 0) < state.get("max_retries", 2) else "FAILED",
             "compose_logs": result.logs,
             "error_tail": result.error_tail,
-            "status_message": f"Docker Compose check failed: {result.status_summary}",
+            "status_message": f"Compose check failed: {result.status_summary}",
         }
 
 

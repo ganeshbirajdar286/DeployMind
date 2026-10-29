@@ -1,0 +1,69 @@
+name: AI DevOps Agent Verification Sandbox
+
+on:
+  workflow_dispatch:
+    inputs:
+      health_port:
+        description: 'Exposed port to probe'
+        required: false
+        default: '{{ default_port | default("80") }}'
+      health_path:
+        description: 'Healthcheck HTTP path'
+        required: false
+        default: '{{ health_check_path | default("/") }}'
+
+jobs:
+  verify-sandbox:
+    name: Cloud Sandbox Smoke-Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Validate Docker Compose Configuration
+        run: |
+          echo "=== 1. Validating Compose Specification ==="
+          docker compose config
+
+      - name: Boot Services with Docker Compose
+        run: |
+          echo "=== 2. Launching Containers in Background ==="
+          docker compose up -d --build
+
+      - name: Inspect Container Runtime Status
+        run: |
+          echo "=== 3. Container Status ==="
+          docker compose ps
+
+      - name: Probe Application Health
+        run: |
+          echo "=== 4. Probing Health Endpoint ==="
+          {% raw %}
+          PORT="${{ github.event.inputs.health_port }}"
+          PATH_URI="${{ github.event.inputs.health_path }}"
+          
+          if [ -n "$PORT" ]; then
+            echo "Waiting for service to accept traffic on http://localhost:$PORT$PATH_URI..."
+            for i in {1..20}; do
+              HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$PORT$PATH_URI" || echo "000")
+              echo "Attempt $i: Received HTTP $HTTP_CODE"
+              if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 400 ]; then
+                echo "Healthcheck probe PASSED with HTTP $HTTP_CODE!"
+                exit 0
+              fi
+              sleep 3
+            done
+            echo "Healthcheck probe FAILED: service did not respond within 60 seconds."
+            echo "=== Container Logs ==="
+            docker compose logs
+            exit 1
+          fi
+          {% endraw %}
+
+      - name: Safe Teardown
+        if: always()
+        run: |
+          echo "=== 5. Cleaning Up Sandbox Containers ==="
+          docker compose down -v

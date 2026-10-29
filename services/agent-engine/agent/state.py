@@ -13,7 +13,7 @@ class AgentState(TypedDict):
     repo_path: str
     analysis: Optional[Dict[str, Any]]
     artifacts: Dict[str, str]
-    current_stage: str  # "INITIALIZING", "ANALYZING", "VALIDATING_DOCKER", "VALIDATING_COMPOSE", "REPAIRING", "SUCCESS", "FAILED"
+    current_stage: str
     build_logs: List[str]
     compose_logs: List[str]
     error_tail: str
@@ -24,3 +24,8 @@ class AgentState(TypedDict):
     patch_history: List[PatchRecord]
     status_message: str
     job_id: Optional[str]
+    # Cloud Sandbox Fields
+    sandbox_mode: str  # "auto", "local", "github"
+    github_repo: Optional[str]
+    github_token: Optional[str]
+    github_branch: Optional[str]

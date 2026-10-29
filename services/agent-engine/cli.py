@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from analyzer.detector import analyze_repository
@@ -28,6 +29,10 @@ def main():
     run_parser = subparsers.add_parser("run", help="Run full LangGraph analysis, Dockerfile, and Compose verification")
     run_parser.add_argument("path", type=str, help="Path to repository directory")
     run_parser.add_argument("--retries", type=int, default=2, help="Max AI repair attempts")
+    run_parser.add_argument("--sandbox", choices=["auto", "local", "github"], default="auto", help="Verification sandbox")
+    run_parser.add_argument("--repo", type=str, default=None, help="GitHub repository (owner/repo) for cloud sandbox")
+    run_parser.add_argument("--branch", type=str, default="main", help="Target branch for cloud sandbox")
+    run_parser.add_argument("--token", type=str, default=None, help="GitHub Personal Access Token")
 
     args = parser.parse_args()
     target_path = Path(args.path).resolve()
@@ -92,12 +97,19 @@ def main():
         print("=" * 60)
         print("  AI DevOps Agent - Autonomous LangGraph Verification Workflow")
         print("=" * 60)
-        print(f"Target: {target_path}")
+        print(f"Target Path:    {target_path}")
+        print(f"Sandbox Mode:   {args.sandbox.upper()}")
+        if args.repo:
+            print(f"Cloud Repo:     {args.repo} (Branch: {args.branch})")
         print(f"Max AI Repairs: {args.retries}\n")
 
         final_state = run_devops_workflow(
             repo_path=str(target_path),
             max_retries=args.retries,
+            sandbox_mode=args.sandbox,
+            github_repo=args.repo,
+            github_branch=args.branch,
+            github_token=args.token or os.getenv("GITHUB_TOKEN"),
         )
 
         print("\n" + "=" * 60)
@@ -109,7 +121,7 @@ def main():
         print("=" * 60)
 
         if final_state.get("compose_logs"):
-            print("\n[Docker Compose Verification Report]")
+            print("\n[Verification Execution Report]")
             for log_line in final_state["compose_logs"]:
                 print(f"  {log_line}")
 

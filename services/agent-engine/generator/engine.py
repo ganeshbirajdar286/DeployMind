@@ -23,8 +23,14 @@ def generate_devops_bundle(analysis: ProjectAnalysis) -> Dict[str, str]:
     env = get_jinja_env()
     artifacts: Dict[str, str] = {}
 
+    primary_port = 8080
+    primary_health_path = "/"
+
     # 1. Generate Service-Level Files (Dockerfiles & .dockerignore)
     for service in analysis.services:
+        primary_port = service.default_port
+        primary_health_path = service.health_check_path
+
         dockerfile_template_name = None
         if service.framework == FrameworkType.REACT_VITE:
             dockerfile_template_name = "docker/react_vite.Dockerfile.j2"
@@ -40,7 +46,6 @@ def generate_devops_bundle(analysis: ProjectAnalysis) -> Dict[str, str]:
         if dockerfile_template_name:
             template = env.get_template(dockerfile_template_name)
             
-            # Format start_command into JSON list of args if present
             start_args = None
             if service.start_command:
                 args = service.start_command.split()
@@ -52,15 +57,12 @@ def generate_devops_bundle(analysis: ProjectAnalysis) -> Dict[str, str]:
                 repo_name=analysis.repo_name,
             )
 
-            # Determine destination path
             prefix = "" if service.path == "." else f"{service.path}/"
             artifacts[f"{prefix}Dockerfile"] = rendered_dockerfile
 
-            # Render .dockerignore
             dockerignore_template = env.get_template("docker/.dockerignore.j2")
             artifacts[f"{prefix}.dockerignore"] = dockerignore_template.render()
 
-            # Render .env.example if env vars detected
             if service.env_vars_detected:
                 env_content = "# Generated environment variables template\n"
                 for var in service.env_vars_detected:
@@ -81,7 +83,14 @@ def generate_devops_bundle(analysis: ProjectAnalysis) -> Dict[str, str]:
         services=[s.model_dump() for s in analysis.services],
     )
 
-    # 4. Generate DEPLOYMENT.md
+    # 4. Generate Cloud Sandbox Verification Workflow (GitHub Actions)
+    verify_template = env.get_template("github/ai_devops_verify.yml.j2")
+    artifacts[".github/workflows/ai-devops-verify.yml"] = verify_template.render(
+        default_port=primary_port,
+        health_check_path=primary_health_path,
+    )
+
+    # 5. Generate DEPLOYMENT.md
     artifacts["DEPLOYMENT.md"] = generate_deployment_readme(analysis)
 
     return artifacts
@@ -104,8 +113,8 @@ def generate_deployment_readme(analysis: ProjectAnalysis) -> str:
     md += "## Running Locally with Docker Compose\n\n"
     md += "```bash\n# Build and start all services locally\ndocker compose up --build\n```\n\n"
 
-    md += "## CI/CD Pipeline\n\n"
-    md += "A GitHub Actions workflow has been configured at `.github/workflows/ci.yml`.\n"
-    md += "It automatically tests, lints, and verifies container builds on every pull request.\n"
+    md += "## CI/CD & Cloud Sandbox Testing\n\n"
+    md += "- `.github/workflows/ci.yml`: Standard pull request test & build workflow.\n"
+    md += "- `.github/workflows/ai-devops-verify.yml`: Cloud sandbox workflow for automated container verification.\n"
 
     return md
