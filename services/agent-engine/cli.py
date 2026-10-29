@@ -33,6 +33,7 @@ def main():
     run_parser.add_argument("--repo", type=str, default=None, help="GitHub repository (owner/repo) for cloud sandbox")
     run_parser.add_argument("--branch", type=str, default="main", help="Target branch for cloud sandbox")
     run_parser.add_argument("--token", type=str, default=None, help="GitHub Personal Access Token")
+    run_parser.add_argument("--write", action="store_true", help="Automatically write verified files into target repo upon SUCCESS")
 
     args = parser.parse_args()
     target_path = Path(args.path).resolve()
@@ -136,7 +137,20 @@ def main():
         print(f"\nVerified Artifacts ({len(artifacts)}):")
         for key in artifacts.keys():
             print(f"  - {key}")
-        print()
+
+        # Automatically write to disk if requested and successful
+        if args.write:
+            if final_state.get("build_succeeded", False) or final_state.get("current_stage") == "SUCCESS":
+                print(f"\nWriting verified files to {target_path} ...")
+                for rel_path, content in artifacts.items():
+                    dest_file = target_path / rel_path
+                    dest_file.parent.mkdir(parents=True, exist_ok=True)
+                    dest_file.write_text(content, encoding="utf-8")
+                print(f"Successfully saved all {len(artifacts)} verified DevOps files into your project!\n")
+            else:
+                print("\n[Skipped Writing]: Verification did not pass. Files were not written.\n")
+        else:
+            print(f"\n(Note: Files kept in memory. To write them to disk, pass '--write' or run 'generate')\n")
 
 
 if __name__ == "__main__":
