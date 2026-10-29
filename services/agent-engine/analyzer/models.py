@@ -56,6 +56,8 @@ class ServiceMetadata(BaseModel):
     health_check_path: str = Field(default="/", description="Health check HTTP route")
     output_dir: Optional[str] = Field(default=None, description="Build output directory (e.g. dist, .next)")
     env_vars_detected: List[str] = Field(default_factory=list, description="Environment variables referenced in code")
+    extra_pypi_packages: List[str] = Field(default_factory=list, description="Unlisted PyPI packages detected via AST")
+    system_packages: List[str] = Field(default_factory=list, description="OS-level apt packages required by libraries (e.g. ffmpeg)")
     has_existing_dockerfile: bool = False
     has_existing_compose: bool = False
     has_existing_ci: bool = False

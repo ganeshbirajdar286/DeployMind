@@ -11,7 +11,7 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
+    build-essential {% if system_packages %}{{ system_packages | join(' ') }}{% endif %} \
     && rm -rf /var/lib/apt/lists/*
 
 # Create virtual environment
@@ -31,6 +31,11 @@ COPY requirements.txt* ./
 RUN if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 {% endif %}
 
+{% if extra_pypi_packages %}
+# Install unlisted dependencies detected via AST source scanning
+RUN pip install --no-cache-dir {{ extra_pypi_packages | join(' ') }}
+{% endif %}
+
 # ==========================================
 # Stage 2: Minimal Production Runner
 # ==========================================
@@ -42,6 +47,13 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PATH="/opt/venv/bin:$PATH" \
     PORT={{ default_port | default(8000) }}
+
+{% if system_packages %}
+# Install runtime system packages (e.g. ffmpeg, libpq)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    {{ system_packages | join(' ') }} \
+    && rm -rf /var/lib/apt/lists/*
+{% endif %}
 
 # Security: Create and use non-root application user
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app

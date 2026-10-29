@@ -32,3 +32,30 @@ def test_generate_fastapi_bundle():
     assert "FROM python:3.11-slim AS builder" in dockerfile
     assert "EXPOSE 8000" in dockerfile
     assert "uvicorn" in dockerfile
+
+
+def test_generate_bundle_with_ast_packages():
+    from analyzer.models import ProjectAnalysis, ServiceMetadata, FrameworkType, Language, PackageManager
+
+    analysis = ProjectAnalysis(
+        repo_name="rag-video-test",
+        services=[
+            ServiceMetadata(
+                name="api",
+                path=".",
+                framework=FrameworkType.FASTAPI,
+                language=Language.PYTHON,
+                package_manager=PackageManager.PIP,
+                runtime_version="3.11",
+                start_command="python main.py",
+                extra_pypi_packages=["openai-whisper", "yt-dlp"],
+                system_packages=["ffmpeg"],
+            )
+        ]
+    )
+    bundle = generate_devops_bundle(analysis)
+    dockerfile = bundle["Dockerfile"]
+
+    # Verify system packages in builder and runner
+    assert "ffmpeg" in dockerfile
+    assert "pip install --no-cache-dir openai-whisper yt-dlp" in dockerfile

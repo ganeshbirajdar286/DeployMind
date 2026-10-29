@@ -107,3 +107,20 @@ def test_patcher_subgraph_langgraph_execution():
     assert "build-essential" in final_state["updated_dockerfile"]
     assert final_state["is_syntax_valid"] is True
     assert final_state["internal_retries"] >= 1
+
+
+def test_ai_patcher_missing_whisper_and_ffmpeg():
+    dockerfile = """FROM python:3.11-slim AS builder
+WORKDIR /app
+RUN pip install -r requirements.txt
+FROM python:3.11-slim AS runner
+WORKDIR /app
+COPY --from=builder /opt/venv /opt/venv
+CMD ["python", "main.py"]
+"""
+    error_tail = "ModuleNotFoundError: No module named 'whisper'"
+    patch = diagnose_and_patch(dockerfile, error_tail, framework="fastapi")
+
+    assert patch.failure_category == "MISSING_PYTHON_MODULE"
+    assert "openai-whisper" in patch.updated_dockerfile
+    assert "ffmpeg" in patch.updated_dockerfile

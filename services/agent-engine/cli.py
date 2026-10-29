@@ -21,6 +21,7 @@ def main():
         help="Run autonomous DevOps pipeline on a GitHub URL or local repo",
     )
     auto_parser.add_argument("target", type=str, help="GitHub URL (https://github.com/owner/repo), slug (owner/repo), or local path")
+    auto_parser.add_argument("--repo", type=str, default=None, help="GitHub repository (owner/repo) if target is a local path")
     auto_parser.add_argument("--branch", type=str, default="ai-devops-setup", help="Dedicated branch name to push")
     auto_parser.add_argument("--token", type=str, default=None, help="GitHub Personal Access Token")
     auto_parser.add_argument("--retries", type=int, default=3, help="Max self-healing iterations (default: 3)")
@@ -54,6 +55,7 @@ def main():
             github_token=args.token or os.getenv("GITHUB_TOKEN"),
             branch_name=args.branch,
             max_iterations=args.retries,
+            repo=args.repo,
         )
         return
 

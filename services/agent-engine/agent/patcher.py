@@ -4,6 +4,7 @@ import re
 from typing import TypedDict, List, Literal, Optional
 from langgraph.graph import StateGraph, END
 from pydantic import BaseModel, Field
+from analyzer.ast_scanner import IMPORT_TO_PYPI, PACKAGE_TO_SYSTEM_DEPS
 
 
 # ==========================================
@@ -13,8 +14,9 @@ class PatcherState(TypedDict):
     current_dockerfile: str
     error_tail: str
     framework: str
-    failure_category: str  # DEPENDENCY_MISMATCH, MISSING_HEADER, DATABASE_CLIENT, MISSING_ENV_FILE, MISSING_PYTHON_MODULE, GENERAL
+    failure_category: str  # DEPENDENCY_MISMATCH, MISSING_HEADER, DATABASE_CLIENT, MISSING_ENV_FILE, MISSING_PYTHON_MODULE, MISSING_SYSTEM_TOOL, GENERAL
     missing_module: Optional[str]
+    missing_tool: Optional[str]
     diagnosis: str
     patch_explanation: str
     updated_dockerfile: str
@@ -42,6 +44,7 @@ def diagnose_failure_node(state: PatcherState) -> dict:
     category = "GENERAL"
     diagnosis = "Build failed during container image creation."
     missing_mod = None
+    missing_tool = None
 
     # Check for Python Missing Modules (e.g. yt_dlp, fastapi, etc.)
     match = re.search(r"ModuleNotFoundError:\s+No module named\s+['\"]([a-zA-Z0-9_\-]+)['\"]", error_raw, re.IGNORECASE)
@@ -52,6 +55,10 @@ def diagnose_failure_node(state: PatcherState) -> dict:
         missing_mod = match.group(1).strip()
         category = "MISSING_PYTHON_MODULE"
         diagnosis = f"Python application crashed on startup: missing dependency '{missing_mod}'."
+    elif any(token in err_lower for token in ["couldn't find ffmpeg", "ffmpeg or avconv", "ffmpeg: not found", "no such file or directory: 'ffmpeg'"]):
+        category = "MISSING_SYSTEM_TOOL"
+        missing_tool = "ffmpeg"
+        diagnosis = "Application requires OS-level 'ffmpeg' binary for audio/video processing."
     elif "env file" in err_lower and ("not found" in err_lower or "no such file" in err_lower):
         category = "MISSING_ENV_FILE"
         diagnosis = "Docker Compose failed because referenced `.env` file does not exist in the repository."
@@ -72,6 +79,7 @@ def diagnose_failure_node(state: PatcherState) -> dict:
         "failure_category": category,
         "diagnosis": diagnosis,
         "missing_module": missing_mod,
+        "missing_tool": missing_tool,
     }
 
 
@@ -137,8 +145,8 @@ Return ONLY a JSON response:
     patched = current_dockerfile
 
     if category == "MISSING_PYTHON_MODULE" and missing_mod:
-        # Standardize e.g. yt_dlp -> yt-dlp
-        pkg_name = missing_mod.replace("_", "-") if missing_mod == "yt_dlp" else missing_mod
+        # Standardize e.g. whisper -> openai-whisper, yt_dlp -> yt-dlp
+        pkg_name = IMPORT_TO_PYPI.get(missing_mod, missing_mod.replace("_", "-"))
         lines = current_dockerfile.splitlines()
 
         # Find where pip install runs or before CMD
@@ -149,8 +157,32 @@ Return ONLY a JSON response:
                 break
 
         lines.insert(insert_idx, f"RUN pip install --no-cache-dir {pkg_name}")
+
+        # Check if this package requires system tools (e.g. ffmpeg)
+        needed_tools = PACKAGE_TO_SYSTEM_DEPS.get(missing_mod, []) + PACKAGE_TO_SYSTEM_DEPS.get(pkg_name, [])
+        for tool in needed_tools:
+            if tool not in current_dockerfile:
+                for idx, line in enumerate(lines):
+                    if "AS runner" in line or (idx > 0 and line.startswith("FROM ") and "builder" not in line):
+                        lines.insert(idx + 1, f"RUN apt-get update && apt-get install -y --no-install-recommends {tool} && rm -rf /var/lib/apt/lists/*")
+                        break
+
         patched = "\n".join(lines)
         patch_explanation = f"Injected 'RUN pip install --no-cache-dir {pkg_name}' to resolve ModuleNotFoundError."
+
+    elif category == "MISSING_SYSTEM_TOOL":
+        tool = state.get("missing_tool") or "ffmpeg"
+        lines = current_dockerfile.splitlines()
+        injected = False
+        for idx, line in enumerate(lines):
+            if "AS runner" in line or (idx > 0 and line.startswith("FROM ") and "builder" not in line):
+                lines.insert(idx + 1, f"RUN apt-get update && apt-get install -y --no-install-recommends {tool} && rm -rf /var/lib/apt/lists/*")
+                injected = True
+                break
+        if not injected:
+            lines.insert(1, f"RUN apt-get update && apt-get install -y --no-install-recommends {tool} && rm -rf /var/lib/apt/lists/*")
+        patched = "\n".join(lines)
+        patch_explanation = f"Injected OS-level package '{tool}' into container runner stage."
 
     elif category == "MISSING_ENV_FILE":
         patch_explanation = "Made environment file optional in Docker Compose to prevent missing .env crash."

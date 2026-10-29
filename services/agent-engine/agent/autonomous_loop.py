@@ -38,12 +38,12 @@ def parse_github_slug(target: str) -> Optional[str]:
 
 
 def resolve_target_workspace(
-    target: str, token: Optional[str] = None
+    target: str, token: Optional[str] = None, repo: Optional[str] = None
 ) -> Tuple[Path, Optional[str], Optional[tempfile.TemporaryDirectory]]:
     """Resolves target: if it's a GitHub URL or slug, clones it into a temp workspace."""
-    github_slug = parse_github_slug(target)
+    github_slug = parse_github_slug(target) or (parse_github_slug(repo) if repo else None)
 
-    if github_slug:
+    if github_slug and (parse_github_slug(target) or not Path(target).exists()):
         temp_dir = tempfile.TemporaryDirectory()
         work_path = Path(temp_dir.name)
         print(f"\n[Auto-Clone] Detected GitHub repository: {github_slug}")
@@ -72,7 +72,7 @@ def resolve_target_workspace(
         print(f"Error: Target path not found: {target}", file=sys.stderr)
         sys.exit(1)
 
-    return local_path, None, None
+    return local_path, github_slug, None
 
 
 def run_autonomous_pipeline(
@@ -80,10 +80,11 @@ def run_autonomous_pipeline(
     github_token: Optional[str] = None,
     branch_name: str = "ai-devops-setup",
     max_iterations: int = 3,
+    repo: Optional[str] = None,
 ):
     """Coordinates the entire autonomous journey: GitHub URL -> Clone -> Analysis -> Secrets -> Diff -> Push -> Self-Healing."""
     token = github_token or os.getenv("GITHUB_TOKEN")
-    target_path, detected_repo, temp_workspace = resolve_target_workspace(target, token=token)
+    target_path, detected_repo, temp_workspace = resolve_target_workspace(target, token=token, repo=repo)
 
     try:
         print("=" * 60)

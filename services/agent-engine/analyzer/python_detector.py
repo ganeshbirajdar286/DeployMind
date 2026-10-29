@@ -3,6 +3,7 @@ import re
 from pathlib import Path
 from typing import Optional, List
 from .models import ServiceMetadata, FrameworkType, Language, PackageManager
+from .ast_scanner import scan_python_imports
 
 
 def detect_python_service(directory: Path, service_name: str = "api") -> Optional[ServiceMetadata]:
@@ -56,17 +57,32 @@ def detect_python_service(directory: Path, service_name: str = "api") -> Optiona
 
     module_name = entry_file.replace(".py", "") if entry_file else "main"
 
-    if "fastapi" in dep_text:
+    # AST Deep Scan for missing/unlisted imports & system dependencies (e.g. ffmpeg)
+    ast_pypi_pkgs, ast_system_deps = scan_python_imports(directory)
+
+    # Normalize dep_text to find which packages are already listed
+    dep_words = set(re.findall(r"[a-z0-9_\-]+", dep_text.lower()))
+
+    unlisted_pypi = []
+    for pkg in sorted(ast_pypi_pkgs):
+        pkg_norm = pkg.lower()
+        pkg_alt = pkg_norm.replace("-", "_")
+        if pkg_norm not in dep_words and pkg_alt not in dep_words:
+            unlisted_pypi.append(pkg)
+
+    system_packages = sorted(list(ast_system_deps))
+
+    if "fastapi" in dep_text or "fastapi" in ast_pypi_pkgs:
         framework = FrameworkType.FASTAPI
         default_port = 8000
         health_check_path = "/docs"
         start_cmd = f"uvicorn {module_name}:app --host 0.0.0.0 --port 8000"
-    elif "flask" in dep_text:
+    elif "flask" in dep_text or "flask" in ast_pypi_pkgs:
         framework = FrameworkType.FLASK
         default_port = 5000
         health_check_path = "/"
         start_cmd = f"gunicorn --bind 0.0.0.0:5000 {module_name}:app"
-    elif "django" in dep_text or (directory / "manage.py").exists():
+    elif "django" in dep_text or "django" in ast_pypi_pkgs or (directory / "manage.py").exists():
         framework = FrameworkType.DJANGO
         default_port = 8000
         health_check_path = "/"
@@ -108,6 +124,8 @@ def detect_python_service(directory: Path, service_name: str = "api") -> Optiona
         test_command=test_cmd,
         default_port=default_port,
         health_check_path=health_check_path,
+        extra_pypi_packages=unlisted_pypi,
+        system_packages=system_packages,
         has_existing_dockerfile=(directory / "Dockerfile").exists(),
         has_existing_compose=(directory / "docker-compose.yml").exists() or (directory / "compose.yaml").exists(),
         has_existing_ci=(directory / ".github" / "workflows").exists(),
@@ -115,5 +133,7 @@ def detect_python_service(directory: Path, service_name: str = "api") -> Optiona
             "has_pyproject": has_pyproject,
             "has_requirements": has_requirements,
             "entry_file": entry_file,
+            "extra_pypi_packages": unlisted_pypi,
+            "system_packages": system_packages,
         }
     )
