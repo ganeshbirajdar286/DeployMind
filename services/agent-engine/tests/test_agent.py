@@ -1,3 +1,4 @@
+import tempfile
 from pathlib import Path
 from runner.docker_runner import DockerRunner
 from agent.graph import run_devops_workflow
@@ -22,12 +23,31 @@ def test_docker_runner_validation():
             dockerfile_path.unlink()
 
 
+def test_docker_runner_compose_validation():
+    runner = DockerRunner()
+    sample_compose = """version: '3.8'
+services:
+  web:
+    build: .
+    ports:
+      - "3000:3000"
+"""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_compose = Path(temp_dir) / "docker-compose.yml"
+        temp_compose.write_text(sample_compose, encoding="utf-8")
+
+        res = runner.validate_compose(compose_file_path=temp_compose, ports_to_probe=[3000])
+        assert res.success is True
+        assert res.syntax_valid is True
+
+
 def test_langgraph_workflow_sample_fastapi():
     target = FIXTURES_DIR / "sample-fastapi"
     state = run_devops_workflow(repo_path=str(target), max_retries=2)
 
     assert state["current_stage"] == "SUCCESS"
     assert state["build_succeeded"] is True
+    assert state["compose_succeeded"] is True
     assert "Dockerfile" in state["artifacts"]
     assert "docker-compose.yml" in state["artifacts"]
     assert ".github/workflows/ci.yml" in state["artifacts"]

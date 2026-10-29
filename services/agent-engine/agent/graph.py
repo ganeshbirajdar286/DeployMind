@@ -1,12 +1,28 @@
 from typing import Literal
 from langgraph.graph import StateGraph, END
 from .state import AgentState
-from .nodes import analyze_and_generate_node, validate_build_node, repair_patch_node
+from .nodes import (
+    analyze_and_generate_node,
+    validate_build_node,
+    validate_compose_node,
+    repair_patch_node,
+)
 
 
-def decide_after_validation(state: AgentState) -> Literal["repair_patch", "__end__"]:
-    """Conditional router determining whether to retry with AI repair or finish."""
+def decide_after_docker_build(state: AgentState) -> Literal["validate_compose", "repair_patch", "__end__"]:
+    """Routes to compose validation on success, or repair loop on failure."""
     if state.get("build_succeeded", False):
+        return "validate_compose"
+
+    if state.get("retry_count", 0) >= state.get("max_retries", 2):
+        return END
+
+    return "repair_patch"
+
+
+def decide_after_compose(state: AgentState) -> Literal["repair_patch", "__end__"]:
+    """Completes on compose success, or routes to repair loop on failure."""
+    if state.get("compose_succeeded", False):
         return END
 
     if state.get("retry_count", 0) >= state.get("max_retries", 2):
@@ -16,21 +32,34 @@ def decide_after_validation(state: AgentState) -> Literal["repair_patch", "__end
 
 
 def build_devops_graph() -> StateGraph:
-    """Constructs the LangGraph supervisor workflow."""
+    """Constructs the comprehensive LangGraph supervisor workflow."""
     workflow = StateGraph(AgentState)
 
     # Register Nodes
     workflow.add_node("analyze_and_generate", analyze_and_generate_node)
     workflow.add_node("validate_build", validate_build_node)
+    workflow.add_node("validate_compose", validate_compose_node)
     workflow.add_node("repair_patch", repair_patch_node)
 
     # Configure Edges
     workflow.set_entry_point("analyze_and_generate")
     workflow.add_edge("analyze_and_generate", "validate_build")
 
+    # Routing after Dockerfile validation
     workflow.add_conditional_edges(
         "validate_build",
-        decide_after_validation,
+        decide_after_docker_build,
+        {
+            "validate_compose": "validate_compose",
+            "repair_patch": "repair_patch",
+            END: END,
+        }
+    )
+
+    # Routing after Docker Compose validation
+    workflow.add_conditional_edges(
+        "validate_compose",
+        decide_after_compose,
         {
             "repair_patch": "repair_patch",
             END: END,
@@ -58,10 +87,12 @@ def run_devops_workflow(
         "artifacts": {},
         "current_stage": "INITIALIZING",
         "build_logs": [],
+        "compose_logs": [],
         "error_tail": "",
         "retry_count": 0,
         "max_retries": max_retries,
         "build_succeeded": False,
+        "compose_succeeded": False,
         "patch_history": [],
         "status_message": "Starting AI DevOps Agent...",
         "job_id": job_id,

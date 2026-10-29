@@ -24,8 +24,8 @@ def main():
     gen_parser.add_argument("--out", type=str, default=None, help="Output directory (defaults to target repo)")
     gen_parser.add_argument("--dry-run", action="store_true", help="Print generated files without writing")
 
-    # Run agent command (LangGraph full loop)
-    run_parser = subparsers.add_parser("run", help="Run full LangGraph analysis, generation, and validation loop")
+    # Run agent command (LangGraph full loop with Dockerfile & Compose smoke tests)
+    run_parser = subparsers.add_parser("run", help="Run full LangGraph analysis, Dockerfile, and Compose verification")
     run_parser.add_argument("path", type=str, help="Path to repository directory")
     run_parser.add_argument("--retries", type=int, default=2, help="Max AI repair attempts")
 
@@ -90,7 +90,7 @@ def main():
 
     elif args.command == "run":
         print("=" * 60)
-        print("  AI DevOps Agent - Autonomous LangGraph Workflow")
+        print("  AI DevOps Agent - Autonomous LangGraph Verification Workflow")
         print("=" * 60)
         print(f"Target: {target_path}")
         print(f"Max AI Repairs: {args.retries}\n")
@@ -101,11 +101,17 @@ def main():
         )
 
         print("\n" + "=" * 60)
-        print(f" Final Stage:     {final_state.get('current_stage')}")
-        print(f" Build Verified:  {'YES' if final_state.get('build_succeeded') else 'NO'}")
-        print(f" Retries Used:    {final_state.get('retry_count')}")
-        print(f" Status Message:  {final_state.get('status_message')}")
+        print(f" Final Stage:            {final_state.get('current_stage')}")
+        print(f" Dockerfile Build Check: {'PASSED' if final_state.get('build_succeeded') else 'FAILED'}")
+        print(f" Docker Compose Check:   {'PASSED' if final_state.get('compose_succeeded') else 'FAILED'}")
+        print(f" AI Repairs Applied:     {final_state.get('retry_count')}")
+        print(f" Verification Status:    {final_state.get('status_message')}")
         print("=" * 60)
+
+        if final_state.get("compose_logs"):
+            print("\n[Docker Compose Verification Report]")
+            for log_line in final_state["compose_logs"]:
+                print(f"  {log_line}")
 
         if final_state.get("patch_history"):
             print("\n[AI Patch History]")
@@ -115,7 +121,7 @@ def main():
                 print(f"    - Fix Applied: {patch['patch_explanation']}")
 
         artifacts = final_state.get("artifacts", {})
-        print(f"\nGenerated Artifacts ({len(artifacts)}):")
+        print(f"\nVerified Artifacts ({len(artifacts)}):")
         for key in artifacts.keys():
             print(f"  - {key}")
         print()
