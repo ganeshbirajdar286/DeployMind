@@ -15,13 +15,12 @@ def main():
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # 1. Autonomous End-to-End Command (The Full Experience)
+    # 1. Autonomous End-to-End Command (Takes GitHub URL or Local Path)
     auto_parser = subparsers.add_parser(
         "auto",
-        help="Interactive autonomous workflow: Inspect -> Configure Secrets -> Show Diffs -> Confirm -> Push -> 3-Iteration Cloud Self-Healing",
+        help="Run autonomous DevOps pipeline on a GitHub URL or local repo",
     )
-    auto_parser.add_argument("path", type=str, help="Path to local repository directory")
-    auto_parser.add_argument("--repo", type=str, default=None, help="GitHub repository (owner/repo) for cloud push & testing")
+    auto_parser.add_argument("target", type=str, help="GitHub URL (https://github.com/owner/repo), slug (owner/repo), or local path")
     auto_parser.add_argument("--branch", type=str, default="ai-devops-setup", help="Dedicated branch name to push")
     auto_parser.add_argument("--token", type=str, default=None, help="GitHub Personal Access Token")
     auto_parser.add_argument("--retries", type=int, default=3, help="Max self-healing iterations (default: 3)")
@@ -48,22 +47,23 @@ def main():
     run_parser.add_argument("--write", action="store_true", help="Automatically write verified files into target repo upon SUCCESS")
 
     args = parser.parse_args()
-    target_path = Path(args.path).resolve()
-
-    if not target_path.exists() or not target_path.is_dir():
-        print(f"Error: Directory not found: {target_path}", file=sys.stderr)
-        sys.exit(1)
 
     if args.command == "auto":
         run_autonomous_pipeline(
-            target_path=target_path,
-            github_repo=args.repo,
+            target=args.target,
             github_token=args.token or os.getenv("GITHUB_TOKEN"),
             branch_name=args.branch,
             max_iterations=args.retries,
         )
+        return
 
-    elif args.command == "inspect":
+    # For commands that require an existing local path:
+    target_path = Path(args.path).resolve()
+    if not target_path.exists() or not target_path.is_dir():
+        print(f"Error: Directory not found: {target_path}", file=sys.stderr)
+        sys.exit(1)
+
+    if args.command == "inspect":
         print(f"\nScanning repository at: {target_path} ...\n")
         analysis = analyze_repository(target_path)
         if args.json:
@@ -74,7 +74,7 @@ def main():
             print(f" Monorepo:   {'Yes' if analysis.is_monorepo else 'No'}")
             print("=" * 60)
             for idx, svc in enumerate(analysis.services, 1):
-                target = analysis.suggested_deployment_targets.get(svc.name, "Render")
+                target_prov = analysis.suggested_deployment_targets.get(svc.name, "Render")
                 print(f"\n[Service {idx}: '{svc.name}']")
                 print(f"  * Framework:          {svc.framework.value}")
                 print(f"  * Language:           {svc.language.value}")
@@ -82,7 +82,7 @@ def main():
                 print(f"  * Exposed Port:       {svc.default_port}")
                 print(f"  * Start Command:      {svc.start_command or 'None'}")
                 print(f"  * Build Command:      {svc.build_command or 'None'}")
-                print(f"  * Recommended Deploy: {target.upper()}")
+                print(f"  * Recommended Deploy: {target_prov.upper()}")
                 if svc.env_vars_detected:
                     print(f"  * Detected Env Vars:  {', '.join(svc.env_vars_detected)}")
 
