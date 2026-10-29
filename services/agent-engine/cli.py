@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 from analyzer.detector import analyze_repository
 from generator.engine import generate_devops_bundle
+from agent.graph import run_devops_workflow
 
 
 def main():
@@ -23,6 +24,11 @@ def main():
     gen_parser.add_argument("--out", type=str, default=None, help="Output directory (defaults to target repo)")
     gen_parser.add_argument("--dry-run", action="store_true", help="Print generated files without writing")
 
+    # Run agent command (LangGraph full loop)
+    run_parser = subparsers.add_parser("run", help="Run full LangGraph analysis, generation, and validation loop")
+    run_parser.add_argument("path", type=str, help="Path to repository directory")
+    run_parser.add_argument("--retries", type=int, default=2, help="Max AI repair attempts")
+
     args = parser.parse_args()
     target_path = Path(args.path).resolve()
 
@@ -30,11 +36,9 @@ def main():
         print(f"Error: Directory not found: {target_path}", file=sys.stderr)
         sys.exit(1)
 
-    # 1. Run Analysis
-    print(f"\nScanning repository at: {target_path} ...\n")
-    analysis = analyze_repository(target_path)
-
     if args.command == "inspect":
+        print(f"\nScanning repository at: {target_path} ...\n")
+        analysis = analyze_repository(target_path)
         if args.json:
             print(analysis.model_dump_json(indent=2))
         else:
@@ -66,6 +70,8 @@ def main():
             print("=" * 60 + "\n")
 
     elif args.command == "generate":
+        print(f"\nScanning repository at: {target_path} ...\n")
+        analysis = analyze_repository(target_path)
         artifacts = generate_devops_bundle(analysis)
         out_dir = Path(args.out).resolve() if args.out else target_path
 
@@ -81,6 +87,38 @@ def main():
                 dest_file.parent.mkdir(parents=True, exist_ok=True)
                 dest_file.write_text(content, encoding="utf-8")
             print(f"\nSuccessfully written all configuration files to: {out_dir}\n")
+
+    elif args.command == "run":
+        print("=" * 60)
+        print("  AI DevOps Agent - Autonomous LangGraph Workflow")
+        print("=" * 60)
+        print(f"Target: {target_path}")
+        print(f"Max AI Repairs: {args.retries}\n")
+
+        final_state = run_devops_workflow(
+            repo_path=str(target_path),
+            max_retries=args.retries,
+        )
+
+        print("\n" + "=" * 60)
+        print(f" Final Stage:     {final_state.get('current_stage')}")
+        print(f" Build Verified:  {'YES' if final_state.get('build_succeeded') else 'NO'}")
+        print(f" Retries Used:    {final_state.get('retry_count')}")
+        print(f" Status Message:  {final_state.get('status_message')}")
+        print("=" * 60)
+
+        if final_state.get("patch_history"):
+            print("\n[AI Patch History]")
+            for patch in final_state["patch_history"]:
+                print(f"  Attempt {patch['attempt']}:")
+                print(f"    - Diagnosis:   {patch['diagnosis']}")
+                print(f"    - Fix Applied: {patch['patch_explanation']}")
+
+        artifacts = final_state.get("artifacts", {})
+        print(f"\nGenerated Artifacts ({len(artifacts)}):")
+        for key in artifacts.keys():
+            print(f"  - {key}")
+        print()
 
 
 if __name__ == "__main__":
