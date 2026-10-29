@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
 {% for service in services %}
   {{ service.name }}:
@@ -14,6 +12,7 @@ services:
       - PORT={{ service.default_port }}
 {% if service.env_vars_detected %}
     env_file:
-      - {{ service.path }}/.env
+      - path: {{ service.path }}/.env
+        required: false
 {% endif %}
 {% endfor %}

@@ -6,27 +6,39 @@ from pathlib import Path
 from analyzer.detector import analyze_repository
 from generator.engine import generate_devops_bundle
 from agent.graph import run_devops_workflow
+from agent.autonomous_loop import run_autonomous_pipeline
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="AI DevOps Agent - Core Repository Analysis & DevOps Generator"
+        description="AI DevOps Agent - Autonomous Cloud & Local DevOps Automation Platform"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # Inspect command
+    # 1. Autonomous End-to-End Command (The Full Experience)
+    auto_parser = subparsers.add_parser(
+        "auto",
+        help="Interactive autonomous workflow: Inspect -> Configure Secrets -> Show Diffs -> Confirm -> Push -> 3-Iteration Cloud Self-Healing",
+    )
+    auto_parser.add_argument("path", type=str, help="Path to local repository directory")
+    auto_parser.add_argument("--repo", type=str, default=None, help="GitHub repository (owner/repo) for cloud push & testing")
+    auto_parser.add_argument("--branch", type=str, default="ai-devops-setup", help="Dedicated branch name to push")
+    auto_parser.add_argument("--token", type=str, default=None, help="GitHub Personal Access Token")
+    auto_parser.add_argument("--retries", type=int, default=3, help="Max self-healing iterations (default: 3)")
+
+    # 2. Inspect command
     inspect_parser = subparsers.add_parser("inspect", help="Inspect a repository and display analysis")
     inspect_parser.add_argument("path", type=str, help="Path to repository directory")
     inspect_parser.add_argument("--json", action="store_true", help="Output raw JSON")
 
-    # Generate command
+    # 3. Generate command
     gen_parser = subparsers.add_parser("generate", help="Generate Docker and CI/CD configuration")
     gen_parser.add_argument("path", type=str, help="Path to repository directory")
     gen_parser.add_argument("--out", type=str, default=None, help="Output directory (defaults to target repo)")
     gen_parser.add_argument("--dry-run", action="store_true", help="Print generated files without writing")
 
-    # Run agent command (LangGraph full loop with Dockerfile & Compose smoke tests)
-    run_parser = subparsers.add_parser("run", help="Run full LangGraph analysis, Dockerfile, and Compose verification")
+    # 4. Run agent command (LangGraph full loop)
+    run_parser = subparsers.add_parser("run", help="Run LangGraph analysis, Dockerfile, and Compose verification")
     run_parser.add_argument("path", type=str, help="Path to repository directory")
     run_parser.add_argument("--retries", type=int, default=2, help="Max AI repair attempts")
     run_parser.add_argument("--sandbox", choices=["auto", "local", "github"], default="auto", help="Verification sandbox")
@@ -42,7 +54,16 @@ def main():
         print(f"Error: Directory not found: {target_path}", file=sys.stderr)
         sys.exit(1)
 
-    if args.command == "inspect":
+    if args.command == "auto":
+        run_autonomous_pipeline(
+            target_path=target_path,
+            github_repo=args.repo,
+            github_token=args.token or os.getenv("GITHUB_TOKEN"),
+            branch_name=args.branch,
+            max_iterations=args.retries,
+        )
+
+    elif args.command == "inspect":
         print(f"\nScanning repository at: {target_path} ...\n")
         analysis = analyze_repository(target_path)
         if args.json:
@@ -138,7 +159,6 @@ def main():
         for key in artifacts.keys():
             print(f"  - {key}")
 
-        # Automatically write to disk if requested and successful
         if args.write:
             if final_state.get("build_succeeded", False) or final_state.get("current_stage") == "SUCCESS":
                 print(f"\nWriting verified files to {target_path} ...")

@@ -31,7 +31,7 @@ class GitHubActionsRunner:
         health_port: int = 8000,
         health_path: str = "/",
         timeout_seconds: int = 360,
-        poll_interval: int = 5,
+        poll_interval: int = 4,
     ) -> ComposeValidationResult:
         """Dispatches the verification workflow on GitHub Actions and streams real logs."""
         logs = [
@@ -90,7 +90,7 @@ class GitHubActionsRunner:
             )
 
         # 2. Wait and find the Run ID
-        time.sleep(4)
+        time.sleep(3)
         runs_url = f"{self.base_url}/repos/{repo}/actions/runs"
         run_id = None
         start_time = time.time()
@@ -109,7 +109,7 @@ class GitHubActionsRunner:
                         break
             except Exception:
                 pass
-            time.sleep(3)
+            time.sleep(2)
 
         if not run_id:
             logs.append("WARNING: Dispatched workflow but could not poll run ID within 30s.")
@@ -144,6 +144,7 @@ class GitHubActionsRunner:
             time.sleep(poll_interval)
 
         success = (conclusion == "success")
+        error_tail = ""
 
         # 4. Fetch job step logs summary
         jobs_url = f"{self.base_url}/repos/{repo}/actions/runs/{run_id}/jobs"
@@ -154,6 +155,8 @@ class GitHubActionsRunner:
                 for step in job.get("steps", []):
                     icon = "[OK]" if step.get("conclusion") == "success" else "[FAIL]"
                     logs.append(f"  {icon} Step: {step.get('name')}")
+                    if step.get("conclusion") == "failure":
+                        error_tail = f"Step '{step.get('name')}' failed in GitHub Actions cloud sandbox."
         except Exception:
             pass
 
@@ -163,7 +166,7 @@ class GitHubActionsRunner:
             containers_started=True,
             health_check_passed=success,
             logs=logs,
-            error_tail="" if success else f"GitHub Actions runner run #{run_id} failed with conclusion: {conclusion}",
+            error_tail=error_tail if not success else "",
             is_simulated=False,
             status_summary=f"GitHub Actions cloud sandbox run #{run_id}: {conclusion.upper() if conclusion else 'TIMED_OUT'}",
         )

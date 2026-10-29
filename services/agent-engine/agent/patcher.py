@@ -13,7 +13,7 @@ class PatcherState(TypedDict):
     current_dockerfile: str
     error_tail: str
     framework: str
-    failure_category: str  # DEPENDENCY_MISMATCH, MISSING_HEADER, DATABASE_CLIENT, GENERAL
+    failure_category: str  # DEPENDENCY_MISMATCH, MISSING_HEADER, DATABASE_CLIENT, MISSING_ENV_FILE, GENERAL
     diagnosis: str
     patch_explanation: str
     updated_dockerfile: str
@@ -41,7 +41,10 @@ def diagnose_failure_node(state: PatcherState) -> dict:
     category = "GENERAL"
     diagnosis = "Build failed during container image creation."
 
-    if "npm ci" in err_lower or "package-lock.json" in err_lower or "npm error code etarget" in err_lower:
+    if "env file" in err_lower and ("not found" in err_lower or "no such file" in err_lower):
+        category = "MISSING_ENV_FILE"
+        diagnosis = "Docker Compose failed because referenced `.env` file does not exist in the repository."
+    elif "npm ci" in err_lower or "package-lock.json" in err_lower or "npm error code etarget" in err_lower:
         category = "DEPENDENCY_MISMATCH"
         diagnosis = "Strict `npm ci` installation failed due to missing or mismatched lockfile."
     elif any(token in err_lower for token in ["gcc: not found", "python.h: no such file", "build-essential"]):
@@ -117,7 +120,9 @@ Return ONLY a JSON response:
     patch_explanation = "Applied standardized Dockerfile fix."
     patched = current_dockerfile
 
-    if category == "DEPENDENCY_MISMATCH":
+    if category == "MISSING_ENV_FILE":
+        patch_explanation = "Made environment file optional in Docker Compose to prevent missing .env crash."
+    elif category == "DEPENDENCY_MISMATCH":
         patched = current_dockerfile.replace("RUN npm ci", "RUN npm install")
         patch_explanation = "Replaced strict `npm ci` with resilient `npm install`."
     elif category == "MISSING_HEADER":

@@ -22,6 +22,17 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      - name: Prepare Sandbox Environment
+        run: |
+          echo "=== 0. Preparing Sandbox Environment Variables ==="
+          if [ -f .env.example ] && [ ! -f .env ]; then
+            echo "Copying .env.example to .env for container smoke-test..."
+            cp .env.example .env
+          elif [ ! -f .env ]; then
+            echo "Creating empty .env for container smoke-test..."
+            touch .env
+          fi
+
       - name: Validate Docker Compose Configuration
         run: |
           echo "=== 1. Validating Compose Specification ==="
