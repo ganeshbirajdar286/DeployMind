@@ -13,7 +13,8 @@ class PatcherState(TypedDict):
     current_dockerfile: str
     error_tail: str
     framework: str
-    failure_category: str  # DEPENDENCY_MISMATCH, MISSING_HEADER, DATABASE_CLIENT, MISSING_ENV_FILE, GENERAL
+    failure_category: str  # DEPENDENCY_MISMATCH, MISSING_HEADER, DATABASE_CLIENT, MISSING_ENV_FILE, MISSING_PYTHON_MODULE, GENERAL
+    missing_module: Optional[str]
     diagnosis: str
     patch_explanation: str
     updated_dockerfile: str
@@ -35,13 +36,23 @@ class DockerPatchResult(BaseModel):
 # ==========================================
 def diagnose_failure_node(state: PatcherState) -> dict:
     """Node 1: Classifies error category and produces root cause analysis."""
-    err_lower = state.get("error_tail", "").lower()
-    framework = state.get("framework", "").lower()
+    error_raw = state.get("error_tail", "")
+    err_lower = error_raw.lower()
 
     category = "GENERAL"
     diagnosis = "Build failed during container image creation."
+    missing_mod = None
 
-    if "env file" in err_lower and ("not found" in err_lower or "no such file" in err_lower):
+    # Check for Python Missing Modules (e.g. yt_dlp, fastapi, etc.)
+    match = re.search(r"ModuleNotFoundError:\s+No module named\s+['\"]([a-zA-Z0-9_\-]+)['\"]", error_raw, re.IGNORECASE)
+    if not match:
+        match = re.search(r"ImportError:\s+cannot import name\s+.*from\s+['\"]([a-zA-Z0-9_\-]+)['\"]", error_raw, re.IGNORECASE)
+
+    if match:
+        missing_mod = match.group(1).strip()
+        category = "MISSING_PYTHON_MODULE"
+        diagnosis = f"Python application crashed on startup: missing dependency '{missing_mod}'."
+    elif "env file" in err_lower and ("not found" in err_lower or "no such file" in err_lower):
         category = "MISSING_ENV_FILE"
         diagnosis = "Docker Compose failed because referenced `.env` file does not exist in the repository."
     elif "npm ci" in err_lower or "package-lock.json" in err_lower or "npm error code etarget" in err_lower:
@@ -60,6 +71,7 @@ def diagnose_failure_node(state: PatcherState) -> dict:
     return {
         "failure_category": category,
         "diagnosis": diagnosis,
+        "missing_module": missing_mod,
     }
 
 
@@ -69,6 +81,7 @@ def generate_patch_node(state: PatcherState) -> dict:
     error_tail = state["error_tail"]
     framework = state["framework"]
     category = state.get("failure_category", "GENERAL")
+    missing_mod = state.get("missing_module")
     retries = state.get("internal_retries", 0) + 1
 
     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
@@ -79,7 +92,7 @@ def generate_patch_node(state: PatcherState) -> dict:
             from google.genai import types
 
             client = genai.Client(api_key=api_key)
-            prompt = f"""You are a Docker DevOps expert fixing a failed container build.
+            prompt = f"""You are a Docker DevOps expert fixing a failed container runtime.
 
 Framework: {framework}
 Failure Category: {category}
@@ -88,8 +101,11 @@ Diagnosis: {state.get('diagnosis')}
 === CURRENT DOCKERFILE ===
 {current_dockerfile}
 
-=== ERROR LOG (Tail) ===
+=== ACTUAL CONTAINER RUNTIME LOGS ===
 {error_tail}
+
+Task:
+Fix the Dockerfile so that the application boots without error. If a Python package is missing, add 'RUN pip install <package>'.
 
 Return ONLY a JSON response:
 {{
@@ -120,7 +136,23 @@ Return ONLY a JSON response:
     patch_explanation = "Applied standardized Dockerfile fix."
     patched = current_dockerfile
 
-    if category == "MISSING_ENV_FILE":
+    if category == "MISSING_PYTHON_MODULE" and missing_mod:
+        # Standardize e.g. yt_dlp -> yt-dlp
+        pkg_name = missing_mod.replace("_", "-") if missing_mod == "yt_dlp" else missing_mod
+        lines = current_dockerfile.splitlines()
+
+        # Find where pip install runs or before CMD
+        insert_idx = len(lines) - 1
+        for i, line in enumerate(lines):
+            if "pip install" in line:
+                insert_idx = i + 1
+                break
+
+        lines.insert(insert_idx, f"RUN pip install --no-cache-dir {pkg_name}")
+        patched = "\n".join(lines)
+        patch_explanation = f"Injected 'RUN pip install --no-cache-dir {pkg_name}' to resolve ModuleNotFoundError."
+
+    elif category == "MISSING_ENV_FILE":
         patch_explanation = "Made environment file optional in Docker Compose to prevent missing .env crash."
     elif category == "DEPENDENCY_MISMATCH":
         patched = current_dockerfile.replace("RUN npm ci", "RUN npm install")
@@ -233,6 +265,7 @@ def diagnose_and_patch(
         "error_tail": error_tail,
         "framework": framework,
         "failure_category": "GENERAL",
+        "missing_module": None,
         "diagnosis": "",
         "patch_explanation": "",
         "updated_dockerfile": current_dockerfile,

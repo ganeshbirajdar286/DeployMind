@@ -70,6 +70,17 @@ def test_ai_patcher_rule_fallback():
     assert len(patch.patch_explanation) > 0
 
 
+def test_ai_patcher_missing_python_module():
+    dockerfile = "FROM python:3.11-slim\nWORKDIR /app\nRUN pip install -r requirements.txt\nCMD [\"python\", \"main.py\"]\n"
+    error_tail = "Traceback (most recent call last):\n  File \"/app/main.py\", line 2, in <module>\n    import yt_dlp\nModuleNotFoundError: No module named 'yt_dlp'\n"
+
+    patch = diagnose_and_patch(dockerfile, error_tail, framework="fastapi")
+
+    assert patch.failure_category == "MISSING_PYTHON_MODULE"
+    assert "RUN pip install --no-cache-dir yt-dlp" in patch.updated_dockerfile
+    assert "yt_dlp" in patch.diagnosis
+
+
 def test_patcher_subgraph_langgraph_execution():
     """Directly verifies the LangGraph patcher subgraph state machine."""
     broken_dockerfile = "FROM python:3.11-slim\nWORKDIR /app\nCOPY . .\nCMD [\"python\", \"main.py\"]\n"
@@ -80,6 +91,7 @@ def test_patcher_subgraph_langgraph_execution():
         "error_tail": error_tail,
         "framework": "fastapi",
         "failure_category": "GENERAL",
+        "missing_module": None,
         "diagnosis": "",
         "patch_explanation": "",
         "updated_dockerfile": broken_dockerfile,

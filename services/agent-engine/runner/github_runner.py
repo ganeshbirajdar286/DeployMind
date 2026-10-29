@@ -1,4 +1,5 @@
 import os
+import re
 import time
 from dataclasses import dataclass
 from typing import List, Optional, Dict, Any
@@ -7,7 +8,7 @@ from .docker_runner import ComposeValidationResult
 
 
 class GitHubActionsRunner:
-    """Dispatches and monitors container smoke tests in GitHub Actions cloud sandboxes."""
+    """Dispatches, monitors, and streams raw container logs from GitHub Actions cloud sandboxes."""
 
     def __init__(self, token: Optional[str] = None):
         self.token = token or os.getenv("GITHUB_TOKEN")
@@ -22,6 +23,17 @@ class GitHubActionsRunner:
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
         return headers
+
+    def get_job_raw_logs(self, repo: str, job_id: int) -> str:
+        """Downloads full raw text log of a completed GitHub Actions job."""
+        url = f"{self.base_url}/repos/{repo}/actions/jobs/{job_id}/logs"
+        try:
+            resp = requests.get(url, headers=self._headers(), allow_redirects=True, timeout=20)
+            if resp.status_code == 200:
+                return resp.text
+        except Exception:
+            pass
+        return ""
 
     def dispatch_and_wait(
         self,
@@ -144,9 +156,10 @@ class GitHubActionsRunner:
             time.sleep(poll_interval)
 
         success = (conclusion == "success")
+        container_logs = ""
         error_tail = ""
 
-        # 4. Fetch job step logs summary
+        # 4. Fetch job step logs & download full raw container logs
         jobs_url = f"{self.base_url}/repos/{repo}/actions/runs/{run_id}/jobs"
         try:
             jobs_res = requests.get(jobs_url, headers=self._headers(), timeout=10).json()
@@ -155,10 +168,33 @@ class GitHubActionsRunner:
                 for step in job.get("steps", []):
                     icon = "[OK]" if step.get("conclusion") == "success" else "[FAIL]"
                     logs.append(f"  {icon} Step: {step.get('name')}")
-                    if step.get("conclusion") == "failure":
-                        error_tail = f"Step '{step.get('name')}' failed in GitHub Actions cloud sandbox."
-        except Exception:
-            pass
+
+                # If job failed, download the raw log stream
+                if job.get("conclusion") == "failure":
+                    raw_log = self.get_job_raw_logs(repo, job.get("id"))
+                    if raw_log:
+                        # Extract the container logs section if present
+                        if "=== Container Logs ===" in raw_log:
+                            parts = raw_log.split("=== Container Logs ===")
+                            if len(parts) > 1:
+                                container_section = parts[1].split("=== 5. Cleaning Up")[0]
+                                container_logs = container_section.strip()
+                        elif "Traceback" in raw_log or "Error" in raw_log:
+                            container_logs = raw_log[-2000:].strip()
+
+                        if container_logs:
+                            logs.append("\n" + "=" * 60)
+                            logs.append("📦 LIVE CONTAINER RUNTIME LOGS (from Cloud Sandbox):")
+                            logs.append("=" * 60)
+                            for cl in container_logs.splitlines()[:50]:
+                                logs.append(f"  | {cl}")
+                            logs.append("=" * 60)
+                            error_tail = container_logs
+        except Exception as e:
+            logs.append(f"Error fetching detailed logs: {e}")
+
+        if not error_tail and not success:
+            error_tail = f"GitHub Actions runner run #{run_id} failed with conclusion: {conclusion}"
 
         return ComposeValidationResult(
             success=success,
