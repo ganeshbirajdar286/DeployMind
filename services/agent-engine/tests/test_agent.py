@@ -1,7 +1,7 @@
 from pathlib import Path
 from runner.docker_runner import DockerRunner
 from agent.graph import run_devops_workflow
-from agent.patcher import diagnose_and_patch
+from agent.patcher import diagnose_and_patch, patcher_app
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -10,7 +10,6 @@ def test_docker_runner_validation():
     runner = DockerRunner()
     target_repo = FIXTURES_DIR / "sample-react-vite"
 
-    # Create dummy Dockerfile for runner test
     dockerfile_path = target_repo / "Dockerfile"
     dockerfile_path.write_text("FROM nginx:alpine\nEXPOSE 80\nCMD [\"nginx\", \"-g\", \"daemon off;\"]\n")
 
@@ -46,5 +45,33 @@ def test_ai_patcher_rule_fallback():
 
     assert "npm install" in patch.updated_dockerfile
     assert "npm ci" not in patch.updated_dockerfile
+    assert patch.failure_category == "DEPENDENCY_MISMATCH"
     assert len(patch.diagnosis) > 0
     assert len(patch.patch_explanation) > 0
+
+
+def test_patcher_subgraph_langgraph_execution():
+    """Directly verifies the LangGraph patcher subgraph state machine."""
+    broken_dockerfile = "FROM python:3.11-slim\nWORKDIR /app\nCOPY . .\nCMD [\"python\", \"main.py\"]\n"
+    error_tail = "error: command 'gcc' failed: No such file or directory. Python.h: No such file."
+
+    initial_state = {
+        "current_dockerfile": broken_dockerfile,
+        "error_tail": error_tail,
+        "framework": "fastapi",
+        "failure_category": "GENERAL",
+        "diagnosis": "",
+        "patch_explanation": "",
+        "updated_dockerfile": broken_dockerfile,
+        "is_syntax_valid": False,
+        "validation_errors": [],
+        "internal_retries": 0,
+        "max_internal_retries": 2,
+    }
+
+    final_state = patcher_app.invoke(initial_state)
+
+    assert final_state["failure_category"] == "MISSING_HEADER"
+    assert "build-essential" in final_state["updated_dockerfile"]
+    assert final_state["is_syntax_valid"] is True
+    assert final_state["internal_retries"] >= 1
