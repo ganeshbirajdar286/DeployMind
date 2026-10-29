@@ -2,7 +2,7 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Callable
 import requests
 from .docker_runner import ComposeValidationResult
 
@@ -44,16 +44,25 @@ class GitHubActionsRunner:
         health_path: str = "/",
         timeout_seconds: int = 360,
         poll_interval: int = 4,
+        log_callback: Optional[Callable[[str], None]] = None,
     ) -> ComposeValidationResult:
         """Dispatches the verification workflow on GitHub Actions and streams real logs."""
-        logs = [
-            f"[GitHubActionsRunner] Target Sandbox: {repo} (branch: {branch})",
-            f"[GitHubActionsRunner] Cloud Workflow: .github/workflows/{workflow_file}",
-        ]
+        logs: List[str] = []
+
+        def emit(msg: str):
+            logs.append(msg)
+            if log_callback:
+                try:
+                    log_callback(msg)
+                except Exception:
+                    pass
+
+        emit(f"[GitHubActionsRunner] Target Sandbox: {repo} (branch: {branch})")
+        emit(f"[GitHubActionsRunner] Cloud Workflow: .github/workflows/{workflow_file}")
 
         if not self.token:
-            logs.append("[GitHubActionsRunner] Warning: No GITHUB_TOKEN configured.")
-            logs.append("[GitHubActionsRunner] Falling back to pre-flight static verification.")
+            emit("[GitHubActionsRunner] Warning: No GITHUB_TOKEN configured.")
+            emit("[GitHubActionsRunner] Falling back to pre-flight static verification.")
             return ComposeValidationResult(
                 success=True,
                 syntax_valid=True,
@@ -75,11 +84,11 @@ class GitHubActionsRunner:
         }
 
         try:
-            logs.append("-> Dispatching cloud sandbox workflow on GitHub Actions...")
+            emit("-> Dispatching cloud sandbox workflow on GitHub Actions...")
             resp = requests.post(dispatch_url, json=payload, headers=self._headers(), timeout=15)
             if resp.status_code not in (204, 201):
                 err_msg = f"Failed to dispatch workflow: HTTP {resp.status_code} - {resp.text}"
-                logs.append(f"ERROR: {err_msg}")
+                emit(f"ERROR: {err_msg}")
                 return ComposeValidationResult(
                     success=False,
                     syntax_valid=True,
@@ -89,14 +98,16 @@ class GitHubActionsRunner:
                     error_tail=err_msg,
                     status_summary="Failed to dispatch GitHub Actions sandbox.",
                 )
-            logs.append("-> Workflow dispatched successfully. Waiting for runner assignment...")
+            emit("-> Workflow dispatched successfully. Waiting for runner assignment...")
         except Exception as e:
+            err_msg = f"Network error connecting to GitHub API: {e}"
+            emit(err_msg)
             return ComposeValidationResult(
                 success=False,
                 syntax_valid=True,
                 containers_started=False,
                 health_check_passed=False,
-                logs=logs + [f"Network error connecting to GitHub API: {e}"],
+                logs=logs,
                 error_tail=str(e),
                 status_summary="Network error connecting to GitHub.",
             )
@@ -115,7 +126,7 @@ class GitHubActionsRunner:
                     for r in runs:
                         if r.get("head_branch") == branch and workflow_file in r.get("path", ""):
                             run_id = r["id"]
-                            logs.append(f"-> Assigned to GitHub Actions Run #{run_id} (HTML: {r.get('html_url')})")
+                            emit(f"-> Assigned to GitHub Actions Run #{run_id} (HTML: {r.get('html_url')})")
                             break
                     if run_id:
                         break
@@ -124,7 +135,7 @@ class GitHubActionsRunner:
             time.sleep(2)
 
         if not run_id:
-            logs.append("WARNING: Dispatched workflow but could not poll run ID within 30s.")
+            emit("WARNING: Dispatched workflow but could not poll run ID within 30s.")
             return ComposeValidationResult(
                 success=True,
                 syntax_valid=True,
@@ -146,10 +157,10 @@ class GitHubActionsRunner:
                 conclusion = r_detail.get("conclusion")
 
                 if status == "completed":
-                    logs.append(f"-> GitHub Actions Runner finished with conclusion: [{conclusion.upper()}]")
+                    emit(f"-> GitHub Actions Runner finished with conclusion: [{conclusion.upper()}]")
                     break
 
-                logs.append(f"   ... Runner is currently {status} (elapsed: {int(time.time() - start_time)}s)")
+                emit(f"   ... Runner is currently {status} (elapsed: {int(time.time() - start_time)}s)")
             except Exception:
                 pass
 
@@ -159,21 +170,52 @@ class GitHubActionsRunner:
         container_logs = ""
         error_tail = ""
 
-        # 4. Fetch job step logs & download full raw container logs
+        # 4. Fetch job step logs & download complete raw console logs for EVERY job
         jobs_url = f"{self.base_url}/repos/{repo}/actions/runs/{run_id}/jobs"
         try:
+            emit("\nDownloading complete GitHub Actions runner execution logs...")
             jobs_res = requests.get(jobs_url, headers=self._headers(), timeout=10).json()
             for job in jobs_res.get("jobs", []):
-                logs.append(f"\n[Cloud Runner Job: {job.get('name')}] Status: {job.get('conclusion')}")
+                job_name = job.get('name')
+                job_id = job.get('id')
+                job_conclusion = job.get('conclusion')
+                emit(f"\n[Cloud Runner Job: {job_name}] Status: {job_conclusion}")
                 for step in job.get("steps", []):
                     icon = "[OK]" if step.get("conclusion") == "success" else "[FAIL]"
-                    logs.append(f"  {icon} Step: {step.get('name')}")
+                    emit(f"  {icon} Step: {step.get('name')}")
 
-                # If job failed, download the raw log stream
-                if job.get("conclusion") == "failure":
-                    raw_log = self.get_job_raw_logs(repo, job.get("id"))
-                    if raw_log:
-                        # Extract container logs using explicit delimiters or fallback
+                # Download the complete raw log text for the job (both on success and failure)
+                raw_log = self.get_job_raw_logs(repo, job_id)
+                if raw_log:
+                    emit("\n" + "=" * 70)
+                    emit(f"📋 FULL GITHUB ACTIONS CONSOLE LOGS (Job: '{job_name}', Run #{run_id})")
+                    emit("=" * 70)
+
+                    for raw_line in raw_log.splitlines():
+                        cleaned = re.sub(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z\s*", "", raw_line).rstrip()
+                        if not cleaned:
+                            continue
+                        if cleaned.startswith("##[group]"):
+                            step_title = cleaned.replace("##[group]", "").strip()
+                            emit(f"\n--- [Step: {step_title}] ---")
+                        elif cleaned.startswith("##[endgroup]"):
+                            continue
+                        elif cleaned.startswith("##[section]"):
+                            sec_title = cleaned.replace("##[section]", "").strip()
+                            emit(f"\n>>> {sec_title}")
+                        elif cleaned.startswith("##[error]"):
+                            err_text = cleaned.replace("##[error]", "").strip()
+                            emit(f"❌ ERROR: {err_text}")
+                        elif cleaned.startswith("##[warning]"):
+                            warn_text = cleaned.replace("##[warning]", "").strip()
+                            emit(f"⚠️ WARNING: {warn_text}")
+                        else:
+                            emit(f"  {cleaned}")
+
+                    emit("=" * 70 + "\n")
+
+                    # Extract container error traceback specifically for the AI patcher if failed
+                    if not success:
                         if "--- BEGIN RAW CONTAINER LOGS ---" in raw_log:
                             parts = raw_log.split("--- BEGIN RAW CONTAINER LOGS ---")
                             last_part = parts[-1]
@@ -189,24 +231,15 @@ class GitHubActionsRunner:
                             tb_idx = raw_log.rfind("Traceback")
                             container_logs = raw_log[tb_idx:].split("##[endgroup]")[0].strip()
 
-                        # Clean timestamps from each line
-                        cleaned_lines = []
                         if container_logs:
-                            for raw_line in container_logs.splitlines():
-                                cleaned = re.sub(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z\s*", "", raw_line).rstrip()
-                                if cleaned and not cleaned.startswith("##["):
-                                    cleaned_lines.append(cleaned)
-
-                        if cleaned_lines:
-                            logs.append("\n" + "=" * 60)
-                            logs.append("📦 LIVE CONTAINER RUNTIME LOGS (from Cloud Sandbox):")
-                            logs.append("=" * 60)
-                            for cl in cleaned_lines[:60]:
-                                logs.append(f"  | {cl}")
-                            logs.append("=" * 60)
-                            error_tail = "\n".join(cleaned_lines)
+                            err_lines = []
+                            for l in container_logs.splitlines():
+                                cl = re.sub(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z\s*", "", l).rstrip()
+                                if cl and not cl.startswith("##["):
+                                    err_lines.append(cl)
+                            error_tail = "\n".join(err_lines)
         except Exception as e:
-            logs.append(f"Error fetching detailed logs: {e}")
+            emit(f"Error fetching detailed logs: {e}")
 
         if not error_tail and not success:
             error_tail = f"GitHub Actions runner run #{run_id} failed with conclusion: {conclusion}"

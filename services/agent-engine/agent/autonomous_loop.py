@@ -187,10 +187,8 @@ def run_autonomous_pipeline(
                 workflow_file="ai-devops-verify.yml",
                 health_port=primary_port,
                 health_path=primary_health_path,
+                log_callback=print,
             )
-
-            for log_line in result.logs:
-                print(f"  {log_line}")
 
             if result.success:
                 print("\n" + "=" * 60)
