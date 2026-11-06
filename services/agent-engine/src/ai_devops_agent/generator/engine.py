@@ -1,6 +1,8 @@
+from __future__ import annotations
+
 import json
 from pathlib import Path
-from typing import Dict
+from typing import Dict, List, Optional
 from jinja2 import Environment, FileSystemLoader
 from ai_devops_agent.analyzer.models import ProjectAnalysis, FrameworkType, ServiceMetadata, Language
 

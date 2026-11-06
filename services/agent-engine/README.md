@@ -11,11 +11,11 @@ Autonomous Cloud & Local DevOps Automation Platform with deterministic repositor
 Any user can install and run the application globally without cloning this repository:
 
 ```bash
-# Using standard pip:
-pip install https://github.com/ganeshbirajdar286/DeployMind/releases/download/v0.1.0/ai_devops_agent-0.1.0-py3-none-any.whl
+# Using uv tool (isolated global CLI command):
+uv tool install --force https://github.com/ganeshbirajdar286/DeployMind/releases/download/v0.1.1/ai_devops_agent-0.1.1-py3-none-any.whl
 
-# Or using uv tool (isolated global CLI command):
-uv tool install https://github.com/ganeshbirajdar286/DeployMind/releases/download/v0.1.0/ai_devops_agent-0.1.0-py3-none-any.whl
+# Or using standard pip:
+pip install https://github.com/ganeshbirajdar286/DeployMind/releases/download/v0.1.1/ai_devops_agent-0.1.1-py3-none-any.whl
 ```
 
 ### 1. Install for Local Development
