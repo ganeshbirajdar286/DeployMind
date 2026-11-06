@@ -10,12 +10,12 @@ Any user can install and run the **DeployMind (`ai-devops`)** terminal agent glo
 
 ### Option 1: Install with `pip`
 ```bash
-pip install https://github.com/ganeshbirajdar286/DeployMind/releases/download/v0.1.0/ai_devops_agent-0.1.0-py3-none-any.whl
+pip install  --force https://github.com/ganeshbirajdar286/DeployMind/releases/download/v0.1.0/ai_devops_agent-0.1.0-py3-none-any.whl
 ```
 
 ### Option 2: Install with `uv` (Recommended for isolated global CLI tool)
 ```bash
-uv tool install https://github.com/ganeshbirajdar286/DeployMind/releases/download/v0.1.0/ai_devops_agent-0.1.0-py3-none-any.whl
+uv tool install --force https://github.com/ganeshbirajdar286/DeployMind/releases/download/v0.1.1/ai_devops_agent-0.1.1-py3-none-any.whl
 ```
 
 ### 🚀 Launch Terminal Agent
