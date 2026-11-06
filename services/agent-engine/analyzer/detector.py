@@ -19,43 +19,34 @@ def analyze_repository(repo_path: Path) -> ProjectAnalysis:
     warnings: List[str] = []
     missing_info: List[str] = []
 
-    # 1. Monorepo Heuristic Check
-    subdirs_to_check = [
-        ("frontend", "backend"),
-        ("client", "server"),
-        ("web", "api"),
-        ("ui", "server"),
-    ]
+    # 1. Monorepo Service Discovery (Scan all immediate subdirectories)
+    ignored_subdirs = {
+        "node_modules", "dist", "build", ".git", ".github", "venv", ".venv",
+        "env", "__pycache__", "coverage", ".next", ".turbo", "public", "assets", "uploads"
+    }
 
     detected_services: List[ServiceMetadata] = []
-    is_monorepo = False
 
-    for client_name, server_name in subdirs_to_check:
-        c_path = repo_path / client_name
-        s_path = repo_path / server_name
-        if c_path.is_dir() and s_path.is_dir():
-            is_monorepo = True
-            # Analyze client
-            c_service = detect_node_service(c_path, service_name=client_name)
-            if c_service:
-                c_service.path = client_name
-                c_service.env_vars_detected = detect_environment_variables(c_path)
-                detected_services.append(c_service)
+    # Check immediate subdirectories first for multi-service/monorepo setups
+    try:
+        for child in sorted(repo_path.iterdir()):
+            if not child.is_dir() or child.name.startswith(".") or child.name.lower() in ignored_subdirs:
+                continue
 
-            # Analyze server (could be Node or Python)
-            s_service = detect_python_service(s_path, service_name=server_name) or detect_node_service(s_path, service_name=server_name)
-            if s_service:
-                s_service.path = server_name
-                s_service.env_vars_detected = detect_environment_variables(s_path)
-                detected_services.append(s_service)
-            break
+            svc = detect_node_service(child, service_name=child.name) or detect_python_service(child, service_name=child.name)
+            if svc:
+                svc.path = child.name
+                svc.env_vars_detected = detect_environment_variables(child)
+                detected_services.append(svc)
+    except Exception:
+        pass
 
-    # If not a standard client/server monorepo, check root directly
+    is_monorepo = len(detected_services) > 1
+
+    # 2. If no subdirectory services found, check the repository root directly
     if not detected_services:
-        # Try Node detection first
         root_service = detect_node_service(repo_path, service_name=repo_name)
         if not root_service:
-            # Try Python detection
             root_service = detect_python_service(repo_path, service_name=repo_name)
 
         if root_service:

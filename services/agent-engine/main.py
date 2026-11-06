@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from analyzer.detector import analyze_repository
 from agent.graph import run_devops_workflow
+from deployer.orchestrator import CloudDeployer
 
 app = FastAPI(
     title="AI DevOps Agent Engine",
@@ -29,6 +30,17 @@ class RunAgentRequest(BaseModel):
 
 class InspectRequest(BaseModel):
     repo_path: str = Field(description="Local filesystem path to repository")
+
+
+class DeployRequest(BaseModel):
+    repo_path: str = Field(description="Local filesystem path to repository")
+    github_repo: str = Field(description="GitHub repository (owner/repo)")
+    branch: str = Field(default="main", description="Branch to deploy from")
+    env_vars: Dict[str, str] = Field(default_factory=dict, description="Key-value environment variables")
+    vercel_token: Optional[str] = Field(default=None, description="Vercel Access Token")
+    render_api_key: Optional[str] = Field(default=None, description="Render API Key")
+    job_id: Optional[str] = Field(default=None, description="Job identifier")
+    webhook_url: Optional[str] = Field(default=None, description="Webhook callback URL")
 
 
 def notify_webhook(webhook_url: str, payload: Dict[str, Any]):
@@ -93,7 +105,59 @@ def run_agent_endpoint(req: RunAgentRequest, background_tasks: BackgroundTasks):
     return response_payload
 
 
+@app.post("/api/agent/deploy")
+def deploy_endpoint(req: DeployRequest, background_tasks: BackgroundTasks):
+    repo_path = Path(req.repo_path).resolve()
+    if not repo_path.exists() or not repo_path.is_dir():
+        raise HTTPException(status_code=400, detail=f"Directory not found: {req.repo_path}")
+
+    analysis = analyze_repository(repo_path)
+    deployer = CloudDeployer(
+        vercel_token=req.vercel_token,
+        render_api_key=req.render_api_key,
+    )
+
+    logs: List[str] = []
+    def log_collector(msg: str):
+        logs.append(msg)
+        if req.webhook_url and req.job_id:
+            try:
+                requests.post(
+                    req.webhook_url,
+                    json={"job_id": req.job_id, "event": "log", "message": msg},
+                    timeout=5,
+                )
+            except Exception:
+                pass
+
+    summary = deployer.deploy_project(
+        analysis=analysis,
+        github_repo=req.github_repo,
+        branch=req.branch,
+        env_values=req.env_vars,
+        log_callback=log_collector,
+    )
+
+    response_payload = {
+        "job_id": req.job_id,
+        "repo_name": summary.repo_name,
+        "branch": summary.branch_name,
+        "all_successful": summary.all_successful,
+        "live_frontend_url": summary.live_frontend_url,
+        "live_backend_url": summary.live_backend_url,
+        "logs": logs,
+    }
+
+    if req.webhook_url:
+        background_tasks.add_task(notify_webhook, req.webhook_url, response_payload)
+
+    return response_payload
+
+
 if __name__ == "__main__":
     import uvicorn
+    from utils.banner import print_banner
+    print_banner()
     port = int(os.getenv("PORT", 8000))
+    print(f"\033[38;2;0;229;255m🚀 FastAPI Agent Engine running on http://localhost:{port}\033[0m\n")
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)

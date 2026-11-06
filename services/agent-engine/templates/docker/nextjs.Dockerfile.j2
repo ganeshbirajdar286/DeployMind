@@ -14,7 +14,7 @@ COPY package.json yarn.lock ./
 RUN yarn install --frozen-lockfile
 {% else %}
 COPY package*.json ./
-RUN npm ci
+RUN if [ -f package-lock.json ]; then npm ci || npm install; else npm install; fi
 {% endif %}
 
 # ==========================================
@@ -47,6 +47,14 @@ COPY --from=builder /app/.next/standalone ./ 2>/dev/null || true
 COPY --from=builder /app/.next/static ./.next/static 2>/dev/null || true
 COPY --from=builder /app/node_modules ./node_modules 2>/dev/null || true
 COPY --from=builder /app/package.json ./package.json
+
+# Monorepo compatibility symlinks for parent-relative imports
+RUN ln -s /app /backend 2>/dev/null || true && \
+    ln -s /app /server 2>/dev/null || true && \
+    ln -s /app /api 2>/dev/null || true && \
+    ln -s /app /app/backend 2>/dev/null || true && \
+    ln -s /app /app/server 2>/dev/null || true && \
+    ln -s /app /app/api 2>/dev/null || true
 
 USER nextjs
 

@@ -25,8 +25,8 @@ ENV_PATTERNS = [
 def detect_environment_variables(directory: Path) -> List[str]:
     detected: Set[str] = set()
 
-    # 1. Check for .env.example / .env.sample / .env.template
-    for sample_name in [".env.example", ".env.sample", ".env.template", ".env.defaults"]:
+    # 1. Check for .env and template files (.env, .env.local, .env.example, .env.sample, .env.template)
+    for sample_name in [".env", ".env.local", ".env.production", ".env.example", ".env.sample", ".env.template", ".env.defaults"]:
         sample_path = directory / sample_name
         if sample_path.exists():
             try:
@@ -46,8 +46,8 @@ def detect_environment_variables(directory: Path) -> List[str]:
         and not any(ignored in str(f) for ignored in ["node_modules", ".venv", "dist", "build", ".next", ".git"])
     ]
 
-    # Limit to maximum 30 files for instantaneous performance
-    for file_path in candidate_files[:30]:
+    # Inspect up to 150 project source files
+    for file_path in candidate_files[:150]:
         try:
             content = file_path.read_text(encoding="utf-8", errors="ignore")
             for pattern in ENV_PATTERNS:

@@ -80,3 +80,31 @@ import pydub
     assert "yt-dlp" in svc.extra_pypi_packages
     assert "pydub" not in svc.extra_pypi_packages  # already in requirements.txt!
     assert "ffmpeg" in svc.system_packages
+
+
+def test_detect_client_backend_monorepo(tmp_path):
+    # Setup client subdirectory (React/Vite)
+    client_dir = tmp_path / "client"
+    client_dir.mkdir()
+    (client_dir / "package.json").write_text('{"name": "my-client", "dependencies": {"vite": "^5.0.0", "react": "^18.0.0"}}', encoding="utf-8")
+
+    # Setup backend subdirectory (Express) with .env.example
+    backend_dir = tmp_path / "backend"
+    backend_dir.mkdir()
+    (backend_dir / "package.json").write_text('{"name": "my-backend", "dependencies": {"express": "^4.18.0"}}', encoding="utf-8")
+    (backend_dir / ".env.example").write_text("MOGODB_URL=\nPORT=5000\nJWT_SECRET=\n", encoding="utf-8")
+
+    analysis = analyze_repository(tmp_path)
+
+    assert analysis.is_monorepo is True
+    assert len(analysis.services) == 2
+
+    service_names = {s.name for s in analysis.services}
+    assert "client" in service_names
+    assert "backend" in service_names
+
+    backend_svc = next(s for s in analysis.services if s.name == "backend")
+    assert "MOGODB_URL" in backend_svc.env_vars_detected
+    assert "JWT_SECRET" in backend_svc.env_vars_detected
+    assert analysis.suggested_deployment_targets["client"] == "vercel"
+    assert analysis.suggested_deployment_targets["backend"] == "render"

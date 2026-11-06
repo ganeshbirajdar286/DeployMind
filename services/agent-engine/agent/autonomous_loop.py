@@ -14,6 +14,26 @@ from runner.secrets_manager import GitHubSecretsManager
 from runner.git_pusher import GitPusher
 from runner.github_runner import GitHubActionsRunner
 from utils.diff_viewer import display_bundle_diffs
+from utils.theme import (
+    print_powerline_header,
+    print_step_box,
+    print_box,
+    print_success_box,
+    print_alert_box,
+    prompt_choice,
+    CYAN,
+    PINK,
+    PURPLE,
+    INDIGO,
+    EMERALD,
+    AMBER,
+    RED,
+    WHITE,
+    MUTED,
+    BOLD,
+    DIM,
+    RESET,
+)
 from .patcher import diagnose_and_patch
 
 
@@ -35,6 +55,105 @@ def parse_github_slug(target: str) -> Optional[str]:
             return target
 
     return None
+
+
+def open_file_in_editor(file_path: Path) -> bool:
+    """Opens a file in the user's preferred editor, waiting for the process to exit."""
+    editors = []
+    if os.getenv("EDITOR"):
+        editors.append(os.getenv("EDITOR"))
+    if os.getenv("VISUAL"):
+        editors.append(os.getenv("VISUAL"))
+
+    if sys.platform == "win32":
+        if shutil.which("code"):
+            editors.append("code --wait")
+        editors.append("notepad.exe")
+    else:
+        for ed in ["nano", "vim", "vi"]:
+            if shutil.which(ed):
+                editors.append(ed)
+                break
+
+    for ed_cmd in editors:
+        try:
+            parts = ed_cmd.split() + [str(file_path)]
+            res = subprocess.run(parts, shell=False)
+            if res.returncode == 0:
+                return True
+        except Exception:
+            continue
+
+    if sys.platform == "win32":
+        try:
+            os.startfile(str(file_path))
+            input(f"\n[Editor] Opened '{file_path.name}'. Make your edits, save the file, and press [Enter] to continue...")
+            return True
+        except Exception:
+            pass
+
+    return False
+
+
+def interactive_edit_bundle(target_path: Path, artifacts: Dict[str, str]) -> Dict[str, str]:
+    """Provides a terminal menu allowing the user to select and edit any generated file in their editor."""
+    file_list = list(artifacts.keys())
+
+    while True:
+        print("\n" + "=" * 60)
+        print("✏️  Interactive DevOps File Editor")
+        print("=" * 60)
+        print("Select a file to edit in your editor:")
+        for idx, rel_path in enumerate(file_list, 1):
+            print(f"  [{idx}] {rel_path}")
+        print("  [B] Done editing (return to confirmation menu)")
+
+        choice = input(f"\nEnter choice [1-{len(file_list)} or B]: ").strip().lower()
+        if choice in ("b", "back", "done", "q", "exit", ""):
+            break
+
+        selected_file = None
+        if choice.isdigit():
+            num = int(choice)
+            if 1 <= num <= len(file_list):
+                selected_file = file_list[num - 1]
+        else:
+            for f in file_list:
+                if choice in f.lower():
+                    selected_file = f
+                    break
+
+        if not selected_file:
+            print(f"  [!] Invalid choice: '{choice}'. Please select a valid number or 'B'.")
+            continue
+
+        disk_path = target_path / selected_file
+        disk_path.parent.mkdir(parents=True, exist_ok=True)
+        if not disk_path.exists() or disk_path.read_text(encoding="utf-8", errors="ignore") != artifacts[selected_file]:
+            disk_path.write_text(artifacts[selected_file], encoding="utf-8")
+
+        print(f"\nLaunching editor for '{selected_file}'...")
+        opened = open_file_in_editor(disk_path)
+        if opened:
+            try:
+                updated_content = disk_path.read_text(encoding="utf-8")
+                if updated_content != artifacts[selected_file]:
+                    artifacts[selected_file] = updated_content
+                    print(f"  [OK] Saved modifications to '{selected_file}'!")
+                else:
+                    print(f"  (No changes detected for '{selected_file}')")
+            except Exception as e:
+                print(f"  [!] Error reading updated file: {e}")
+        else:
+            print(f"  [!] Could not open editor automatically. You can edit the file manually at:\n      {disk_path}")
+            input("  Press [Enter] after editing the file...")
+            try:
+                artifacts[selected_file] = disk_path.read_text(encoding="utf-8")
+                print(f"  [OK] Loaded modifications for '{selected_file}'!")
+            except Exception as e:
+                print(f"  [!] Error: {e}")
+
+    return artifacts
 
 
 def resolve_target_workspace(
@@ -87,63 +206,113 @@ def run_autonomous_pipeline(
     target_path, detected_repo, temp_workspace = resolve_target_workspace(target, token=token, repo=repo)
 
     try:
-        print("=" * 60)
-        print("🚀 AI DevOps Agent - Autonomous Cloud Automation")
-        print("=" * 60)
-        if detected_repo:
-            print(f"Target GitHub Repo: {detected_repo}")
-        print(f"Local Workspace:   {target_path}")
-        print(f"Setup Branch:      {branch_name}")
-        print(f"Max Self-Healings: {max_iterations}")
-        print("=" * 60)
+        print_powerline_header(detected_repo or target_path.name, branch_name, "Initializing")
+        print_box(
+            title="🚀 Autonomous Cloud DevOps Engine",
+            lines=[
+                f"{MUTED}Target GitHub Repo:{RESET}  {BOLD}{WHITE}{detected_repo or 'Local Repository'}{RESET}",
+                f"{MUTED}Local Workspace:   {RESET}  {CYAN}{target_path}{RESET}",
+                f"{MUTED}Setup Branch:      {RESET}  {PINK}{branch_name}{RESET}",
+                f"{MUTED}Max Self-Healings: {RESET}  {AMBER}{max_iterations} iterations{RESET}",
+            ],
+            border_color=CYAN,
+        )
 
         # 1. Deterministic Analysis
-        print("\n[Step 1/5] Analyzing repository structure and dependencies...")
         analysis = analyze_repository(target_path)
-        print(f"  * Detected {len(analysis.services)} service(s):")
         all_env_vars = []
         primary_port = 8080
         primary_health_path = "/"
 
+        service_lines = [f"{EMERALD}✔ Detected {len(analysis.services)} service(s):{RESET}"]
         for s in analysis.services:
             target_prov = analysis.suggested_deployment_targets.get(s.name, "Render")
             primary_port = s.default_port
             primary_health_path = s.health_check_path
-            print(f"    - '{s.name}': {s.framework.value} ({s.language.value}) -> Port {s.default_port} -> Deploy: {target_prov.upper()}")
+            service_lines.append(
+                f"  {MUTED}•{RESET} {BOLD}{s.name}{RESET} {MUTED}({s.framework.value}, {s.language.value}){RESET} -> Port {CYAN}{s.default_port}{RESET} -> Deploy: {PURPLE}{target_prov.upper()}{RESET}"
+            )
             all_env_vars.extend(s.env_vars_detected)
 
         all_env_vars = sorted(list(set(all_env_vars)))
+        print_step_box(
+            step_num=1,
+            total_steps=5,
+            title="Repository Structure & Dependency Analysis",
+            lines=service_lines,
+            badge="🔍",
+            border_color=CYAN,
+        )
 
-        # 2. Interactive Secrets Configuration
-        if all_env_vars and detected_repo and token:
-            print("\n[Step 2/5] Configuring Repository Secrets...")
-            secrets_mgr = GitHubSecretsManager(token=token)
-            secrets_mgr.interactive_configure_secrets(repo=detected_repo, detected_vars=all_env_vars)
-        else:
-            print("\n[Step 2/5] Checking Environment Variables...")
-            if all_env_vars:
-                print(f"  Found {len(all_env_vars)} variable reference(s): {', '.join(all_env_vars[:4])}")
+        # 2. Interactive Secrets & Environment Variables Configuration
+        configured_secrets = {}
+        target_repo_name = detected_repo or analysis.repo_name
+        secrets_mgr = GitHubSecretsManager(token=token)
+        configured_secrets = secrets_mgr.interactive_configure_secrets(
+            repo=target_repo_name,
+            detected_vars=all_env_vars,
+            local_env_dir=target_path,
+        )
+        if configured_secrets:
+            for k in configured_secrets.keys():
+                if k not in all_env_vars:
+                    all_env_vars.append(k)
+            all_env_vars.sort()
 
         # 3. Generate DevOps Configuration Bundle
-        print("\n[Step 3/5] Generating DevOps configuration files...")
-        artifacts = generate_devops_bundle(analysis)
-        print(f"  Generated {len(artifacts)} configuration files.")
+        artifacts = generate_devops_bundle(analysis, branch_name=branch_name, extra_env_vars=all_env_vars)
+        artifact_preview_lines = [
+            f"{MUTED}Generated {len(artifacts)} production-ready configuration files:{RESET}",
+        ]
+        for rel_p in sorted(artifacts.keys()):
+            artifact_preview_lines.append(f"  {EMERALD}✔{RESET} {BOLD}{rel_p}{RESET}")
+
+        print_step_box(
+            step_num=3,
+            total_steps=5,
+            title="DevOps Configuration Bundle Generated",
+            lines=artifact_preview_lines,
+            badge="📄",
+            border_color=PINK,
+        )
 
         # 4. Display Syntax-Highlighted Terminal Diffs
         display_bundle_diffs(target_path, artifacts)
 
-        # 5. Human-in-the-Loop Approval
-        print("=" * 60)
-        print("  Human-in-the-Loop Confirmation")
-        print("=" * 60)
-        prompt_text = f"Ready to write files and push branch '{branch_name}' to '{detected_repo}'? [Y/n]: " if detected_repo else f"Ready to write files into '{target_path.name}'? [Y/n]: "
-        confirm = input(prompt_text).strip().lower()
+        # 5. Human-in-the-Loop Approval & Interactive Editing
+        while True:
+            review_lines = [
+                f"{BOLD}{WHITE}Choose approval action:{RESET}",
+                f"  {PINK}[Y]{RESET} 🚀 Proceed and push branch '{branch_name}' to '{detected_repo or target_path.name}'",
+                f"  {CYAN}[E]{RESET} ✏️ Edit generated files in your editor (Dockerfile, Compose, etc.)",
+                f"  {PURPLE}[V]{RESET} 🔍 View syntax-highlighted diffs again",
+                f"  {RED}[N]{RESET} 🛑 Abort and exit",
+            ]
+            print_box(
+                title="Human-in-the-Loop Review & Confirmation",
+                lines=review_lines,
+                border_color=PINK,
+                badge="🛡️",
+            )
 
-        if confirm in ("n", "no"):
-            print("\n[Aborted] No files written. Exiting cleanly.\n")
-            return
+            confirm = prompt_choice("Choose an option [Y/e/v/n]", default="Y").lower()
 
-        # Write files to workspace
+            if confirm in ("e", "edit"):
+                artifacts = interactive_edit_bundle(target_path, artifacts)
+                display_bundle_diffs(target_path, artifacts)
+                continue
+            elif confirm in ("v", "view", "diff"):
+                display_bundle_diffs(target_path, artifacts)
+                continue
+            elif confirm in ("n", "no", "q", "quit", "abort"):
+                print("\n[Aborted] No changes committed. Exiting cleanly.\n")
+                return
+            elif confirm in ("y", "yes", ""):
+                break
+            else:
+                print(f"  [!] Unrecognized option '{confirm}'. Please enter Y, E, V, or N.")
+
+        # Write final files to workspace
         print(f"\nWriting verified configuration files...")
         for rel_path, content in artifacts.items():
             dest_file = target_path / rel_path
@@ -157,7 +326,17 @@ def run_autonomous_pipeline(
             return
 
         # Push to GitHub Branch
-        print(f"\n[Step 4/5] Pushing dedicated branch '{branch_name}' to GitHub...")
+        print_step_box(
+            step_num=4,
+            total_steps=5,
+            title="Promoting Dedicated Branch to GitHub",
+            lines=[
+                f"{MUTED}Target Branch:     {RESET} {PINK}{branch_name}{RESET}",
+                f"{MUTED}Remote Repository: {RESET} {BOLD}{WHITE}{detected_repo}{RESET}",
+            ],
+            badge="🚀",
+            border_color=PURPLE,
+        )
         pusher = GitPusher(token=token)
         pushed, push_msg = pusher.push_branch(
             repo_dir=target_path,
@@ -167,19 +346,31 @@ def run_autonomous_pipeline(
         )
 
         if not pushed:
-            print(f"  [ERROR] Could not push to GitHub: {push_msg}")
+            print_alert_box("GitHub Branch Push Error", [f"Could not push to GitHub: {push_msg}"], is_error=True)
             return
-        print(f"  [OK] {push_msg}")
+        print(f"  {EMERALD}✔ {push_msg}{RESET}")
+        head_sha = pusher.get_head_sha(target_path)
 
         # 6. Autonomous Cloud Verification & Self-Healing Loop (Max iterations)
-        print(f"\n[Step 5/5] Launching Cloud Sandbox on GitHub Actions (Max {max_iterations} iterations)...")
         runner = GitHubActionsRunner(token=token)
         current_artifacts = dict(artifacts)
+        seen_run_ids = set()
 
         for iteration in range(1, max_iterations + 1):
-            print("\n" + "-" * 60)
-            print(f"  Cloud Sandbox Execution - Iteration {iteration}/{max_iterations}")
-            print("-" * 60)
+            print_step_box(
+                step_num=5,
+                total_steps=5,
+                title=f"Cloud Sandbox Execution on GitHub Actions (Attempt {iteration}/{max_iterations})",
+                lines=[
+                    f"{MUTED}Target Repo:       {RESET} {BOLD}{WHITE}{detected_repo}{RESET}",
+                    f"{MUTED}Workflow File:     {RESET} {CYAN}.github/workflows/ai-devops-verify.yml{RESET}",
+                    f"{MUTED}Target Branch:     {RESET} {PINK}{branch_name}{RESET}",
+                    f"{MUTED}Healthcheck Port:  {RESET} {AMBER}{primary_port}{RESET} (Path: {primary_health_path})",
+                    f"{MUTED}Status:            {RESET} {INDIGO}Dispatched to GitHub Actions runner...{RESET}",
+                ],
+                badge="🧪",
+                border_color=INDIGO,
+            )
 
             result = runner.dispatch_and_wait(
                 repo=detected_repo,
@@ -187,33 +378,154 @@ def run_autonomous_pipeline(
                 workflow_file="ai-devops-verify.yml",
                 health_port=primary_port,
                 health_path=primary_health_path,
+                commit_sha=head_sha,
                 log_callback=print,
+                exclude_run_ids=seen_run_ids,
             )
 
+            if runner.last_run_id:
+                seen_run_ids.add(runner.last_run_id)
+
             if result.success:
-                print("\n" + "=" * 60)
-                print("🎉 100% VERIFIED SUCCESS! All Cloud Sandbox Checks Passed!")
-                print("=" * 60)
-                print(f"Branch '{branch_name}' is fully verified with Docker Compose and Health Checks.")
-                print(f"\nOpen your Pull Request now on GitHub:")
-                print(f"👉 https://github.com/{detected_repo}/pull/new/{branch_name}\n")
+                print_success_box(
+                    title="100% VERIFIED SUCCESS! All Cloud Sandbox Checks Passed!",
+                    lines=[
+                        f"Branch {BOLD}'{branch_name}'{RESET} is fully verified with Docker Compose and Health Checks.",
+                        f"{EMERALD}✔ Docker Compose specification validated{RESET}",
+                        f"{EMERALD}✔ Container built and booted successfully{RESET}",
+                        f"{EMERALD}✔ Healthcheck probe accepted traffic with HTTP 200{RESET}",
+                        f"{EMERALD}✔ Safe container teardown complete{RESET}",
+                    ],
+                )
+
+                # Determine base default branch (main/master)
+                default_branch = "main"
+                if detected_repo:
+                    default_branch = pusher.get_default_branch(detected_repo)
+
+                # Create Pull Request to merge verified setup branch into main
+                pr_url = f"https://github.com/{detected_repo}/pull/new/{branch_name}" if detected_repo else ""
+                pr_num = None
+                if detected_repo and token:
+                    print(f"\n{MUTED}[Pull Request]{RESET} Creating Pull Request: '{branch_name}' -> '{default_branch}'...")
+                    pr_ok, fetched_url, fetched_num, pr_msg = pusher.create_pull_request(
+                        repo=detected_repo,
+                        head_branch=branch_name,
+                        base_branch=default_branch,
+                    )
+                    if fetched_url:
+                        pr_url = fetched_url
+                        pr_num = fetched_num
+                        print(f"  {EMERALD}✔ {pr_msg}{RESET}")
+                        print(f"  👉 Pull Request: {CYAN}{pr_url}{RESET}")
+
+                # Production Deployment Guard: Merge into 'main' required
+                guard_lines = [
+                    f"{AMBER}⚠️  All code must be merged into '{default_branch}' before deploying to production.{RESET}",
+                ]
+                if pr_url:
+                    guard_lines.append(f"{MUTED}Pull Request URL:{RESET}  {CYAN}{pr_url}{RESET}")
+                guard_lines.extend([
+                    "",
+                    f"{BOLD}{WHITE}Choose deployment promotion action:{RESET}",
+                    f"  {PINK}[A]{RESET} ⚡ Auto-merge PR #{pr_num or 1} via GitHub API now -> Deploy to Cloud",
+                    f"  {CYAN}[M]{RESET} 👤 I have merged the PR manually on GitHub -> Deploy to Cloud",
+                    f"  {MUTED}[S]{RESET} ⏭️  Skip deployment (deploy anytime with 'uv run python cli.py deploy')",
+                ])
+
+                print_box(
+                    title="Production Cloud Deployment Guard",
+                    lines=guard_lines,
+                    border_color=AMBER,
+                    badge="🛡️ ",
+                )
+
+                deploy_choice = prompt_choice("Enter choice [A/M/S]", default="A").upper()
+
+                if not deploy_choice:
+                    deploy_choice = "M"
+
+                if deploy_choice in ("S", "SKIP", "N", "NO"):
+                    print(f"\n[Notice] Cloud deployment skipped. Merge the PR on GitHub when ready!\n")
+                    return
+
+                # If user selected auto-merge
+                if deploy_choice == "A" and detected_repo and pr_num:
+                    print(f"\n  -> Merging PR #{pr_num} into '{default_branch}' via GitHub API...")
+                    merge_ok, merge_msg = pusher.merge_pull_request(detected_repo, pr_num)
+                    if merge_ok:
+                        print(f"  [OK] {merge_msg}")
+                    else:
+                        print(f"  [!] {merge_msg}. Please merge on GitHub directly.")
+
+                # Verify PR merge status before deploying
+                if detected_repo and pr_num:
+                    is_merged = pusher.is_pull_request_merged(detected_repo, pr_num)
+                    if not is_merged:
+                        print(f"  -> Verifying PR #{pr_num} merge status on GitHub...")
+                        for _ in range(3):
+                            if pusher.is_pull_request_merged(detected_repo, pr_num):
+                                is_merged = True
+                                break
+                            time.sleep(2)
+
+                    if not is_merged:
+                        confirm = input(f"\n⚠️ PR #{pr_num} does not appear merged into '{default_branch}' yet. Deploy anyway? [y/N]: ").strip().lower()
+                        if confirm not in ("y", "yes"):
+                            print(f"\n[Halted] Deployment paused until PR is merged into '{default_branch}'.\n")
+                            return
+
+                print(f"\n✅ Ready! Launching Cloud Deployment from '{default_branch}'...")
+                try:
+                    from deployer import interactive_cloud_deployment
+                    interactive_cloud_deployment(
+                        analysis=analysis,
+                        detected_repo=detected_repo,
+                        branch_name=default_branch,
+                        local_env_dir=target_path,
+                        default_env_values=configured_secrets,
+                    )
+                except Exception as e:
+                    print(f"\n[Notice] Cloud deployment skipped: {e}\n")
                 return
 
             # Handle failure & Self-Healing
             if iteration < max_iterations:
                 print(f"\n[AI Self-Healing]: Cloud build failed on attempt {iteration}. Diagnosing failure...")
+                
+                # Identify which service in monorepo failed from logs
+                target_service = analysis.services[0] if analysis.services else None
+                error_combined = (result.error_tail or "") + "\n" + "\n".join(result.logs[-40:])
+
+                for s in analysis.services:
+                    if f"-{s.name}" in error_combined or f"/{s.name}" in error_combined or f"_{s.name}" in error_combined:
+                        target_service = s
+                        break
+
+                dockerfile_rel_path = "Dockerfile"
+                if target_service and target_service.path != ".":
+                    dockerfile_rel_path = f"{target_service.path}/Dockerfile"
+
+                current_df = current_artifacts.get(dockerfile_rel_path, "")
+                if not current_df and (target_path / dockerfile_rel_path).exists():
+                    current_df = (target_path / dockerfile_rel_path).read_text(encoding="utf-8")
+
                 patch_result = diagnose_and_patch(
-                    current_dockerfile=current_artifacts.get("Dockerfile", ""),
-                    error_tail=result.error_tail or "\n".join(result.logs[-20:]),
-                    framework=analysis.services[0].framework.value if analysis.services else "unknown",
+                    current_dockerfile=current_df,
+                    error_tail=error_combined,
+                    framework=target_service.framework.value if target_service else "unknown",
                 )
 
-                print(f"  * Diagnosis:   {patch_result.diagnosis}")
-                print(f"  * AI Patch:    {patch_result.patch_explanation}")
+                if target_service:
+                    print(f"  * Failing Service: {target_service.name} ({dockerfile_rel_path})")
+                print(f"  * Diagnosis:       {patch_result.diagnosis}")
+                print(f"  * AI Patch:        {patch_result.patch_explanation}")
 
-                # Apply patch to disk
-                (target_path / "Dockerfile").write_text(patch_result.updated_dockerfile, encoding="utf-8")
-                current_artifacts["Dockerfile"] = patch_result.updated_dockerfile
+                # Apply patch to the correct Dockerfile on disk
+                patch_dest = target_path / dockerfile_rel_path
+                patch_dest.parent.mkdir(parents=True, exist_ok=True)
+                patch_dest.write_text(patch_result.updated_dockerfile, encoding="utf-8")
+                current_artifacts[dockerfile_rel_path] = patch_result.updated_dockerfile
 
                 # Push patch to GitHub branch
                 print(f"  * Pushing AI patch to '{branch_name}' on GitHub...")
@@ -223,7 +535,8 @@ def run_autonomous_pipeline(
                     commit_message=f"fix(devops): apply AI self-healing patch (Attempt {iteration})",
                     github_repo=detected_repo,
                 )
-                print("  * Patch pushed. Re-dispatching Cloud Sandbox...")
+                head_sha = pusher.get_head_sha(target_path)
+                print("  * Patch pushed. Re-verifying Cloud Sandbox...")
                 time.sleep(3)
             else:
                 print("\n" + "=" * 60)

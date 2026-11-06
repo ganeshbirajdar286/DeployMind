@@ -124,3 +124,22 @@ CMD ["python", "main.py"]
     assert patch.failure_category == "MISSING_PYTHON_MODULE"
     assert "openai-whisper" in patch.updated_dockerfile
     assert "ffmpeg" in patch.updated_dockerfile
+
+
+def test_ai_patcher_monorepo_path_alias():
+    dockerfile = """FROM node:20-alpine AS runner
+WORKDIR /app
+COPY . .
+USER node
+CMD ["node", "index.js"]
+"""
+    error_tail = """Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/backend/router/email.router.js' imported from /app/index.js
+    at finalizeResolution (node:internal/modules/esm/resolve:283:11)
+    code: 'ERR_MODULE_NOT_FOUND',
+    url: 'file:///backend/router/email.router.js'"""
+
+    patch = diagnose_and_patch(dockerfile, error_tail, framework="express")
+
+    assert patch.failure_category == "MONOREPO_PATH_ALIAS"
+    assert "ln -s /app /backend" in patch.updated_dockerfile
+    assert patch.updated_dockerfile.index("ln -s /app /backend") < patch.updated_dockerfile.index("USER node")

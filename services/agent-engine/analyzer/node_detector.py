@@ -94,7 +94,7 @@ def detect_node_service(directory: Path, service_name: str = "web") -> Optional[
         output_dir = "dist"
         build_cmd = f"{run_prefix} build" if "build" in scripts else "nest build"
         start_cmd = f"{run_prefix} start:prod" if "start:prod" in scripts else "node dist/main"
-        health_check_path = "/health"
+        health_check_path = "/health" if "@nestjs/terminus" in all_deps else "/"
     elif "express" in all_deps:
         framework = FrameworkType.EXPRESS
         default_port = 3000
@@ -107,7 +107,15 @@ def detect_node_service(directory: Path, service_name: str = "web") -> Optional[
         else:
             main_file = pkg_data.get("main", "index.js")
             start_cmd = f"node {main_file}"
-        health_check_path = "/health"
+        # Default to "/" unless an explicit /health route is defined
+        health_check_path = "/"
+        for entry in ["server.js", "app.js", "index.js", "src/server.ts", "src/app.ts", "src/index.ts", "src/main.ts"]:
+            p = directory / entry
+            if p.exists():
+                content = p.read_text(encoding="utf-8", errors="ignore")
+                if re.search(r"(\.get\s*\(\s*['\"]/health['\"]|\.use\s*\(\s*['\"]/health['\"])", content):
+                    health_check_path = "/health"
+                    break
 
     # Scan for custom port in entry files
     custom_port = scan_for_port(directory)

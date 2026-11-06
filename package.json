@@ -9,6 +9,9 @@
   "scripts": {
     "dev:api": "npm --workspace=apps/api run dev",
     "dev:web": "npm --workspace=apps/web run dev",
+    "dev:agent": "cd services/agent-engine && uv run python main.py",
+    "prisma:generate": "npm --workspace=apps/api run prisma:generate",
+    "prisma:push": "npm --workspace=apps/api run prisma:push",
     "build": "npm --workspaces run build"
   }
 }

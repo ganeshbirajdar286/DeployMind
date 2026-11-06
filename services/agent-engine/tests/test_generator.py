@@ -13,7 +13,20 @@ def test_generate_react_vite_bundle():
     assert ".dockerignore" in bundle
     assert "docker-compose.yml" in bundle
     assert ".github/workflows/ci.yml" in bundle
+    assert ".github/workflows/release.yml" in bundle
+    assert ".github/workflows/stale.yml" in bundle
+    assert ".github/dependabot.yml" in bundle
     assert "DEPLOYMENT.md" in bundle
+
+    ci_yml = bundle[".github/workflows/ci.yml"]
+    assert "prepare:" in ci_yml
+    assert "image_tag:" in ci_yml
+    assert "lint:" in ci_yml
+    assert "test:" in ci_yml
+    assert "security-scan:" in ci_yml
+    assert "container-build:" in ci_yml
+    assert "ghcr.io" in ci_yml
+    assert "deploy:" in ci_yml
 
     dockerfile = bundle["Dockerfile"]
     assert "FROM node:20-alpine AS builder" in dockerfile

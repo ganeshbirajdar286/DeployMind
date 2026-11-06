@@ -51,10 +51,26 @@ def diagnose_failure_node(state: PatcherState) -> dict:
     if not match:
         match = re.search(r"ImportError:\s+cannot import name\s+.*from\s+['\"]([a-zA-Z0-9_\-]+)['\"]", error_raw, re.IGNORECASE)
 
+    # Check for Node.js Missing Module or Monorepo Path Resolution Error
+    node_mod_match = re.search(r"Cannot find module\s+['\"](/?[a-zA-Z0-9_\-\./]+)['\"]", error_raw)
+    if not node_mod_match:
+        node_mod_match = re.search(r"ERR_MODULE_NOT_FOUND.*url:\s*['\"]file://(/?[a-zA-Z0-9_\-\./]+)['\"]", error_raw)
+
     if match:
         missing_mod = match.group(1).strip()
         category = "MISSING_PYTHON_MODULE"
         diagnosis = f"Python application crashed on startup: missing dependency '{missing_mod}'."
+    elif node_mod_match:
+        target_path_str = node_mod_match.group(1).strip()
+        first_segment = target_path_str.lstrip("/").split("/")[0] if "/" in target_path_str else target_path_str
+        if first_segment in ("backend", "frontend", "server", "client", "api", "ui", "app") or target_path_str.startswith("/"):
+            category = "MONOREPO_PATH_ALIAS"
+            missing_mod = first_segment
+            diagnosis = f"Node.js module import failed: root-relative path '{target_path_str}' requires container filesystem symlink for '{first_segment}'."
+        elif not target_path_str.startswith(".") and not target_path_str.startswith("/"):
+            category = "MISSING_NODE_MODULE"
+            missing_mod = target_path_str
+            diagnosis = f"Node.js application crashed on startup: missing dependency '{target_path_str}'."
     elif any(token in err_lower for token in ["couldn't find ffmpeg", "ffmpeg or avconv", "ffmpeg: not found", "no such file or directory: 'ffmpeg'"]):
         category = "MISSING_SYSTEM_TOOL"
         missing_tool = "ffmpeg"
@@ -209,6 +225,30 @@ Return ONLY a JSON response:
         lines.insert(insert_idx, "RUN apt-get update && apt-get install -y --no-install-recommends libpq-dev && rm -rf /var/lib/apt/lists/*")
         patched = "\n".join(lines)
         patch_explanation = "Added libpq-dev for PostgreSQL database driver support."
+    elif category == "MONOREPO_PATH_ALIAS":
+        folder = missing_mod or "backend"
+        symlink_cmd = f"RUN ln -s /app /{folder} 2>/dev/null || true && ln -s /app /app/{folder} 2>/dev/null || true"
+        lines = current_dockerfile.splitlines()
+        inserted = False
+        for idx, line in enumerate(lines):
+            if "USER " in line or line.startswith("EXPOSE ") or line.startswith("CMD "):
+                lines.insert(idx, symlink_cmd)
+                inserted = True
+                break
+        if not inserted:
+            lines.insert(len(lines) - 1, symlink_cmd)
+        patched = "\n".join(lines)
+        patch_explanation = f"Injected filesystem compatibility symlink for monorepo path alias '{folder}'."
+    elif category == "MISSING_NODE_MODULE" and missing_mod:
+        lines = current_dockerfile.splitlines()
+        insert_idx = len(lines) - 1
+        for i, line in enumerate(lines):
+            if "npm install" in line or "yarn install" in line or "pnpm install" in line:
+                insert_idx = i + 1
+                break
+        lines.insert(insert_idx, f"RUN npm install {missing_mod}")
+        patched = "\n".join(lines)
+        patch_explanation = f"Injected 'RUN npm install {missing_mod}' to resolve missing Node dependency."
 
     return {
         "patch_explanation": patch_explanation,

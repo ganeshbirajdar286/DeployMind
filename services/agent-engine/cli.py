@@ -7,9 +7,51 @@ from analyzer.detector import analyze_repository
 from generator.engine import generate_devops_bundle
 from agent.graph import run_devops_workflow
 from agent.autonomous_loop import run_autonomous_pipeline
+from utils.banner import print_banner, prompt_for_target
+from utils.theme import (
+    print_box,
+    print_powerline_header,
+    CYAN,
+    PINK,
+    PURPLE,
+    EMERALD,
+    AMBER,
+    WHITE,
+    MUTED,
+    BOLD,
+    DIM,
+    RESET,
+)
 
 
 def main():
+    print_banner()
+
+    # Interactive direct launch when called without arguments: e.g. `uv run python cli.py`
+    if len(sys.argv) == 1:
+        target = prompt_for_target()
+        if not target:
+            print("No repository provided. Exiting.")
+            return
+
+        token = os.getenv("GITHUB_TOKEN")
+        if "github.com" in target and not token:
+            try:
+                entered_token = input("\033[38;2;160;174;192mEnter GitHub Token (optional, press Enter to skip):\033[0m ").strip()
+                token = entered_token or None
+            except (KeyboardInterrupt, EOFError):
+                print()
+                return
+
+        run_autonomous_pipeline(
+            target=target,
+            github_token=token,
+            branch_name="ai-devops-setup",
+            max_iterations=3,
+            repo=None,
+        )
+        return
+
     parser = argparse.ArgumentParser(
         description="AI DevOps Agent - Autonomous Cloud & Local DevOps Automation Platform"
     )
@@ -47,6 +89,18 @@ def main():
     run_parser.add_argument("--token", type=str, default=None, help="GitHub Personal Access Token")
     run_parser.add_argument("--write", action="store_true", help="Automatically write verified files into target repo upon SUCCESS")
 
+    # 5. Cloud Deployment Command (Frontend -> Vercel, Backend -> Render)
+    deploy_parser = subparsers.add_parser(
+        "deploy",
+        help="Deploy verified services to the cloud (Frontend to Vercel, Backend to Render)",
+    )
+    deploy_parser.add_argument("target", type=str, help="GitHub URL (https://github.com/owner/repo), slug, or local path")
+    deploy_parser.add_argument("--repo", type=str, default=None, help="GitHub repository (owner/repo) if target is a local path")
+    deploy_parser.add_argument("--branch", type=str, default="main", help="Dedicated branch name to deploy (default: main)")
+    deploy_parser.add_argument("--vercel-token", type=str, default=None, help="Vercel Access Token (or set VERCEL_TOKEN env var)")
+    deploy_parser.add_argument("--render-token", type=str, default=None, help="Render API Key (or set RENDER_API_KEY env var)")
+    deploy_parser.add_argument("--token", type=str, default=None, help="GitHub Personal Access Token")
+
     args = parser.parse_args()
 
     if args.command == "auto":
@@ -59,6 +113,32 @@ def main():
         )
         return
 
+    if args.command == "deploy":
+        import shutil
+        from agent.autonomous_loop import resolve_target_workspace
+        from deployer import CloudDeployer, interactive_cloud_deployment
+
+        token = args.token or os.getenv("GITHUB_TOKEN")
+        target_path, detected_repo, temp_workspace = resolve_target_workspace(args.target, token=token, repo=args.repo)
+        try:
+            analysis = analyze_repository(target_path)
+            # If tokens provided via flags, inject into environment
+            if args.vercel_token:
+                os.environ["VERCEL_TOKEN"] = args.vercel_token
+            if args.render_token:
+                os.environ["RENDER_API_KEY"] = args.render_token
+
+            interactive_cloud_deployment(
+                analysis=analysis,
+                detected_repo=detected_repo or args.target,
+                branch_name=args.branch,
+                local_env_dir=target_path,
+            )
+        finally:
+            if temp_workspace:
+                shutil.rmtree(temp_workspace, ignore_errors=True)
+        return
+
     # For commands that require an existing local path:
     target_path = Path(args.path).resolve()
     if not target_path.exists() or not target_path.is_dir():
@@ -66,37 +146,40 @@ def main():
         sys.exit(1)
 
     if args.command == "inspect":
-        print(f"\nScanning repository at: {target_path} ...\n")
         analysis = analyze_repository(target_path)
         if args.json:
             print(analysis.model_dump_json(indent=2))
         else:
-            print("=" * 60)
-            print(f" Repository: {analysis.repo_name}")
-            print(f" Monorepo:   {'Yes' if analysis.is_monorepo else 'No'}")
-            print("=" * 60)
+            print_powerline_header(analysis.repo_name, "local", "Inspect")
+            box_lines = [
+                f"{MUTED}Repository: {RESET} {BOLD}{WHITE}{analysis.repo_name}{RESET}  {MUTED}(Monorepo: {'Yes' if analysis.is_monorepo else 'No'}){RESET}",
+                f"{MUTED}Location:   {RESET} {CYAN}{target_path}{RESET}",
+                f"{MUTED}Services:   {RESET} {len(analysis.services)} service(s) identified",
+                "",
+                f"{BOLD}{WHITE}Detected Services:{RESET}",
+            ]
             for idx, svc in enumerate(analysis.services, 1):
                 target_prov = analysis.suggested_deployment_targets.get(svc.name, "Render")
-                print(f"\n[Service {idx}: '{svc.name}']")
-                print(f"  * Framework:          {svc.framework.value}")
-                print(f"  * Language:           {svc.language.value}")
-                print(f"  * Package Manager:    {svc.package_manager.value}")
-                print(f"  * Exposed Port:       {svc.default_port}")
-                print(f"  * Start Command:      {svc.start_command or 'None'}")
-                print(f"  * Build Command:      {svc.build_command or 'None'}")
-                print(f"  * Recommended Deploy: {target_prov.upper()}")
+                box_lines.append(
+                    f"  {CYAN}[{idx}]{RESET} {BOLD}{WHITE}{svc.name}{RESET} {MUTED}({svc.framework.value}, {svc.language.value}){RESET}"
+                )
+                box_lines.append(
+                    f"      Port: {EMERALD}{svc.default_port}{RESET} | Package: {MUTED}{svc.package_manager.value}{RESET} | Deploy Target: {PURPLE}{target_prov.upper()}{RESET}"
+                )
                 if svc.env_vars_detected:
-                    print(f"  * Detected Env Vars:  {', '.join(svc.env_vars_detected)}")
+                    box_lines.append(f"      Env Vars: {DIM}{', '.join(svc.env_vars_detected[:5])}{'...' if len(svc.env_vars_detected) > 5 else ''}{RESET}")
 
             if analysis.warnings:
-                print("\n[Warnings]")
+                box_lines.extend(["", f"{AMBER}⚠️  Warnings:{RESET}"])
                 for w in analysis.warnings:
-                    print(f"  ! {w}")
-            if analysis.missing_info:
-                print("\n[Missing Info]")
-                for m in analysis.missing_info:
-                    print(f"  ? {m}")
-            print("=" * 60 + "\n")
+                    box_lines.append(f"  {AMBER}!{RESET} {MUTED}{w}{RESET}")
+
+            print_box(
+                title=f"🔍 Repository Analysis: {analysis.repo_name}",
+                lines=box_lines,
+                border_color=CYAN,
+            )
+            print()
 
     elif args.command == "generate":
         print(f"\nScanning repository at: {target_path} ...\n")

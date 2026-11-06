@@ -13,6 +13,7 @@ class GitHubActionsRunner:
     def __init__(self, token: Optional[str] = None):
         self.token = token or os.getenv("GITHUB_TOKEN")
         self.base_url = "https://api.github.com"
+        self.last_run_id: Optional[int] = None
 
     def _headers(self) -> Dict[str, str]:
         headers = {
@@ -45,9 +46,12 @@ class GitHubActionsRunner:
         timeout_seconds: int = 360,
         poll_interval: int = 4,
         log_callback: Optional[Callable[[str], None]] = None,
+        commit_sha: Optional[str] = None,
+        exclude_run_ids: Optional[set] = None,
     ) -> ComposeValidationResult:
         """Dispatches the verification workflow on GitHub Actions and streams real logs."""
         logs: List[str] = []
+        self.last_run_id = None
 
         def emit(msg: str):
             logs.append(msg)
@@ -73,7 +77,7 @@ class GitHubActionsRunner:
                 status_summary="Cloud verification prepared (Set GITHUB_TOKEN to execute remotely).",
             )
 
-        # 1. Trigger workflow_dispatch
+        # 1. Trigger workflow_dispatch (or verify if a push-triggered run is already active)
         dispatch_url = f"{self.base_url}/repos/{repo}/actions/workflows/{workflow_file}/dispatches"
         payload = {
             "ref": branch,
@@ -84,66 +88,78 @@ class GitHubActionsRunner:
         }
 
         try:
-            emit("-> Dispatching cloud sandbox workflow on GitHub Actions...")
+            emit("-> Checking cloud sandbox workflow on GitHub Actions...")
             resp = requests.post(dispatch_url, json=payload, headers=self._headers(), timeout=15)
-            if resp.status_code not in (204, 201):
-                err_msg = f"Failed to dispatch workflow: HTTP {resp.status_code} - {resp.text}"
-                emit(f"ERROR: {err_msg}")
-                return ComposeValidationResult(
-                    success=False,
-                    syntax_valid=True,
-                    containers_started=False,
-                    health_check_passed=False,
-                    logs=logs,
-                    error_tail=err_msg,
-                    status_summary="Failed to dispatch GitHub Actions sandbox.",
-                )
-            emit("-> Workflow dispatched successfully. Waiting for runner assignment...")
+            if resp.status_code in (204, 201):
+                emit("-> Workflow dispatched successfully via API. Waiting for runner assignment...")
+            elif resp.status_code in (404, 422):
+                emit(f"-> Workflow '{workflow_file}' is new on branch '{branch}'.")
+                emit(f"-> Tracking automatic push-triggered run on GitHub Actions...")
+            else:
+                emit(f"-> Workflow dispatch returned HTTP {resp.status_code}. Tracking push trigger on '{branch}'...")
         except Exception as e:
-            err_msg = f"Network error connecting to GitHub API: {e}"
-            emit(err_msg)
+            emit(f"-> Workflow dispatch warning: {e}. Tracking push trigger on '{branch}'...")
+
+        # 2. Wait and find the Run ID
+        time.sleep(3)
+        runs_url = f"{self.base_url}/repos/{repo}/actions/runs?branch={branch}&per_page=15"
+        run_id = None
+        start_time = time.time()
+
+        for attempt in range(24):
+            try:
+                res = requests.get(runs_url, headers=self._headers(), timeout=10)
+                if res.status_code == 200:
+                    runs = res.json().get("workflow_runs", [])
+                    for r in runs:
+                        r_id = r.get("id")
+                        if exclude_run_ids and r_id in exclude_run_ids:
+                            continue
+
+                        branch_match = (r.get("head_branch") == branch)
+                        file_match = (
+                            workflow_file in r.get("path", "")
+                            or "ai-devops-verify" in r.get("path", "")
+                            or "ai-devops-verify" in r.get("name", "").lower()
+                            or "verification sandbox" in r.get("name", "").lower()
+                            or "verify" in r.get("name", "").lower()
+                        )
+                        sha_match = True
+                        if commit_sha:
+                            sha_match = (r.get("head_sha") == commit_sha)
+
+                        # Primary match: exact branch, file, and commit SHA
+                        if branch_match and file_match and sha_match:
+                            run_id = r_id
+                            status = r.get("status")
+                            emit(f"-> Assigned to GitHub Actions Run #{run_id} (Status: {status}, HTML: {r.get('html_url')})")
+                            break
+
+                        # Secondary match after attempt 4 (10s): any queued/in_progress run on this branch
+                        if attempt >= 4 and branch_match and r.get("status") in ("queued", "in_progress", "waiting"):
+                            run_id = r_id
+                            status = r.get("status")
+                            emit(f"-> Bound to active GitHub Actions Run #{run_id} (Status: {status}, HTML: {r.get('html_url')})")
+                            break
+
+                    if run_id:
+                        self.last_run_id = run_id
+                        break
+            except Exception:
+                pass
+            time.sleep(2.5)
+
+        if not run_id:
+            err_msg = f"Could not locate an active GitHub Actions workflow run for {workflow_file} on branch '{branch}' within 60s."
+            emit(f"ERROR: {err_msg}")
             return ComposeValidationResult(
                 success=False,
                 syntax_valid=True,
                 containers_started=False,
                 health_check_passed=False,
                 logs=logs,
-                error_tail=str(e),
-                status_summary="Network error connecting to GitHub.",
-            )
-
-        # 2. Wait and find the Run ID
-        time.sleep(3)
-        runs_url = f"{self.base_url}/repos/{repo}/actions/runs"
-        run_id = None
-        start_time = time.time()
-
-        for attempt in range(8):
-            try:
-                res = requests.get(runs_url, headers=self._headers(), timeout=10)
-                if res.status_code == 200:
-                    runs = res.json().get("workflow_runs", [])
-                    for r in runs:
-                        if r.get("head_branch") == branch and workflow_file in r.get("path", ""):
-                            run_id = r["id"]
-                            emit(f"-> Assigned to GitHub Actions Run #{run_id} (HTML: {r.get('html_url')})")
-                            break
-                    if run_id:
-                        break
-            except Exception:
-                pass
-            time.sleep(2)
-
-        if not run_id:
-            emit("WARNING: Dispatched workflow but could not poll run ID within 30s.")
-            return ComposeValidationResult(
-                success=True,
-                syntax_valid=True,
-                containers_started=True,
-                health_check_passed=False,
-                logs=logs,
-                is_simulated=False,
-                status_summary="Workflow dispatched in background on GitHub Actions.",
+                error_tail=err_msg,
+                status_summary=f"Workflow run not detected on branch '{branch}'.",
             )
 
         # 3. Poll for completion
