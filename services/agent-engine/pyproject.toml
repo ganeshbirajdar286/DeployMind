@@ -1,9 +1,26 @@
+[build-system]
+requires = ["uv_build>=0.13.7,<0.14.0"]
+build-backend = "uv_build"
+
 [project]
-name = "agent-engine"
+name = "ai-devops-agent"
 version = "0.1.0"
-description = "Deterministic repository analyzer and AI DevOps configuration engine"
+description = "Autonomous Cloud & Local AI DevOps Automation Platform"
 readme = "README.md"
 requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+    { name = "DevOps Agent Team" }
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Operating System :: OS Independent",
+    "Topic :: Software Development :: Build Tools",
+]
 dependencies = [
     "fastapi>=0.115.0",
     "google-genai>=1.0.0",
@@ -18,11 +35,15 @@ dependencies = [
     "uvicorn>=0.32.0",
 ]
 
+[project.scripts]
+ai-devops = "ai_devops_agent.cli:main"
+agent-engine = "ai_devops_agent.cli:main"
+
 [dependency-groups]
 dev = [
     "pytest>=8.3.0",
 ]
 
 [tool.pytest.ini_options]
-pythonpath = ["."]
+pythonpath = ["src"]
 testpaths = ["tests"]

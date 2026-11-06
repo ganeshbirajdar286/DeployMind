@@ -1,8 +1,8 @@
 import tempfile
 from pathlib import Path
-from runner.docker_runner import DockerRunner
-from agent.graph import run_devops_workflow
-from agent.patcher import diagnose_and_patch, patcher_app
+from ai_devops_agent.runner.docker_runner import DockerRunner
+from ai_devops_agent.agent.graph import run_devops_workflow
+from ai_devops_agent.agent.patcher import diagnose_and_patch, patcher_app
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 

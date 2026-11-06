@@ -1,7 +1,7 @@
 from pathlib import Path
-from runner.github_runner import GitHubActionsRunner
-from analyzer.detector import analyze_repository
-from generator.engine import generate_devops_bundle
+from ai_devops_agent.runner.github_runner import GitHubActionsRunner
+from ai_devops_agent.analyzer.detector import analyze_repository
+from ai_devops_agent.generator.engine import generate_devops_bundle
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -39,7 +39,7 @@ def test_generator_emits_cloud_sandbox_workflow():
 
 def test_workflow_yaml_syntax_validity_with_multiple_secrets():
     import yaml
-    from generator.engine import get_jinja_env
+    from ai_devops_agent.generator.engine import get_jinja_env
 
     env = get_jinja_env()
     tmpl = env.get_template("github/ai_devops_verify.yml.j2")
@@ -70,7 +70,7 @@ def test_workflow_yaml_syntax_validity_with_multiple_secrets():
 
 def test_git_pusher_pr_and_merge_flow():
     from unittest.mock import patch, MagicMock
-    from runner.git_pusher import GitPusher
+    from ai_devops_agent.runner.git_pusher import GitPusher
 
     pusher = GitPusher(token="ghp_test_token_123")
 

@@ -3,10 +3,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, List
 
-from analyzer.detector import analyze_repository
-from generator.engine import generate_devops_bundle
-from runner.docker_runner import DockerRunner
-from runner.github_runner import GitHubActionsRunner
+from ai_devops_agent.analyzer.detector import analyze_repository
+from ai_devops_agent.generator.engine import generate_devops_bundle
+from ai_devops_agent.runner.docker_runner import DockerRunner
+from ai_devops_agent.runner.github_runner import GitHubActionsRunner
 from .state import AgentState, PatchRecord
 from .patcher import diagnose_and_patch
 

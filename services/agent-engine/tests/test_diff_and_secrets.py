@@ -1,7 +1,7 @@
 import base64
 from nacl import public
-from runner.secrets_manager import GitHubSecretsManager
-from utils.diff_viewer import format_colored_diff
+from ai_devops_agent.runner.secrets_manager import GitHubSecretsManager
+from ai_devops_agent.utils.diff_viewer import format_colored_diff
 
 
 def test_format_colored_diff():
@@ -32,7 +32,7 @@ def test_github_secrets_encryption():
 
 
 def test_interactive_edit_bundle_quit(tmp_path, monkeypatch):
-    from agent.autonomous_loop import interactive_edit_bundle
+    from ai_devops_agent.agent.autonomous_loop import interactive_edit_bundle
 
     artifacts = {
         "Dockerfile": "FROM node:20-alpine",

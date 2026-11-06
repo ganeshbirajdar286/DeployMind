@@ -1,6 +1,6 @@
 import pytest
-from utils.theme import str_width, box, CYAN, PINK, INDIGO, EMERALD, AMBER
-from utils.banner import get_terminal_banner
+from ai_devops_agent.utils.theme import str_width, box, CYAN, PINK, INDIGO, EMERALD, AMBER
+from ai_devops_agent.utils.banner import get_terminal_banner
 
 
 def test_str_width_accurately_measures_emojis_and_ansi():

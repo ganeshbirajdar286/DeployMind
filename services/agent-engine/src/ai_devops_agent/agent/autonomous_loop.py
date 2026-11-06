@@ -8,13 +8,13 @@ import time
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
 
-from analyzer.detector import analyze_repository
-from generator.engine import generate_devops_bundle
-from runner.secrets_manager import GitHubSecretsManager
-from runner.git_pusher import GitPusher
-from runner.github_runner import GitHubActionsRunner
-from utils.diff_viewer import display_bundle_diffs
-from utils.theme import (
+from ai_devops_agent.analyzer.detector import analyze_repository
+from ai_devops_agent.generator.engine import generate_devops_bundle
+from ai_devops_agent.runner.secrets_manager import GitHubSecretsManager
+from ai_devops_agent.runner.git_pusher import GitPusher
+from ai_devops_agent.runner.github_runner import GitHubActionsRunner
+from ai_devops_agent.utils.diff_viewer import display_bundle_diffs
+from ai_devops_agent.utils.theme import (
     print_powerline_header,
     print_step_box,
     print_box,
@@ -477,7 +477,7 @@ def run_autonomous_pipeline(
 
                 print(f"\n✅ Ready! Launching Cloud Deployment from '{default_branch}'...")
                 try:
-                    from deployer import interactive_cloud_deployment
+                    from ai_devops_agent.deployer import interactive_cloud_deployment
                     interactive_cloud_deployment(
                         analysis=analysis,
                         detected_repo=detected_repo,

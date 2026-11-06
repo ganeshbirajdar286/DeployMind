@@ -4,7 +4,7 @@ import re
 from typing import TypedDict, List, Literal, Optional
 from langgraph.graph import StateGraph, END
 from pydantic import BaseModel, Field
-from analyzer.ast_scanner import IMPORT_TO_PYPI, PACKAGE_TO_SYSTEM_DEPS
+from ai_devops_agent.analyzer.ast_scanner import IMPORT_TO_PYPI, PACKAGE_TO_SYSTEM_DEPS
 
 
 # ==========================================

@@ -2,11 +2,11 @@ import os
 import getpass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Callable
-from analyzer.models import ProjectAnalysis, ServiceMetadata, FrameworkType
+from ai_devops_agent.analyzer.models import ProjectAnalysis, ServiceMetadata, FrameworkType
 from .models import DeploymentResult, MultiServiceDeploymentSummary
 from .render import RenderDeployer
 from .vercel import VercelDeployer
-from utils.theme import (
+from ai_devops_agent.utils.theme import (
     box,
     print_box,
     CYAN,

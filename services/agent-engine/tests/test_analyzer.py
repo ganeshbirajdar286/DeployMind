@@ -1,6 +1,6 @@
 from pathlib import Path
-from analyzer.detector import analyze_repository
-from analyzer.models import FrameworkType, Language, PackageManager
+from ai_devops_agent.analyzer.detector import analyze_repository
+from ai_devops_agent.analyzer.models import FrameworkType, Language, PackageManager
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -51,8 +51,8 @@ def test_detect_express():
 
 
 def test_ast_scanner_and_system_deps(tmp_path):
-    from analyzer.ast_scanner import scan_python_imports
-    from analyzer.python_detector import detect_python_service
+    from ai_devops_agent.analyzer.ast_scanner import scan_python_imports
+    from ai_devops_agent.analyzer.python_detector import detect_python_service
 
     # Create Python script importing third-party modules and stdlib
     py_code = """import os

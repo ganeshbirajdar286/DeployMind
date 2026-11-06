@@ -2,9 +2,17 @@ import json
 from pathlib import Path
 from typing import Dict
 from jinja2 import Environment, FileSystemLoader
-from analyzer.models import ProjectAnalysis, FrameworkType, ServiceMetadata, Language
+from ai_devops_agent.analyzer.models import ProjectAnalysis, FrameworkType, ServiceMetadata, Language
 
-TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
+try:
+    from importlib.resources import files
+    pkg_templates = Path(str(files("ai_devops_agent").joinpath("templates")))
+    if pkg_templates.exists():
+        TEMPLATES_DIR = pkg_templates
+    else:
+        TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
+except Exception:
+    TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
 
 
 def get_jinja_env() -> Environment:

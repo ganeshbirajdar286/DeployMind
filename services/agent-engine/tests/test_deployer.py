@@ -1,10 +1,10 @@
 import pytest
 from unittest.mock import patch, MagicMock
-from deployer.models import DeploymentResult, MultiServiceDeploymentSummary
-from deployer.render import RenderDeployer
-from deployer.vercel import VercelDeployer
-from deployer.orchestrator import CloudDeployer, partition_service_env_vars
-from analyzer.models import ProjectAnalysis, ServiceMetadata, FrameworkType, Language, PackageManager
+from ai_devops_agent.deployer.models import DeploymentResult, MultiServiceDeploymentSummary
+from ai_devops_agent.deployer.render import RenderDeployer
+from ai_devops_agent.deployer.vercel import VercelDeployer
+from ai_devops_agent.deployer.orchestrator import CloudDeployer, partition_service_env_vars
+from ai_devops_agent.analyzer.models import ProjectAnalysis, ServiceMetadata, FrameworkType, Language, PackageManager
 
 
 def test_render_deployer_without_key():

@@ -1,108 +1,134 @@
-# 🚀 AI DevOps Agent — Full-Stack Cloud Automation Platform
+# 🚀 AI DevOps Agent (`DeployMind`)
 
-An autonomous, enterprise-grade DevOps platform featuring a **React.js Console**, a **Node.js Express API Gateway with Prisma & Neon PostgreSQL**, and a **Python FastAPI Agent Engine with LangGraph and Cloud Sandboxes**.
+An autonomous, terminal-native AI DevOps platform with deterministic AST repository analysis, multi-service containerization, LangGraph-powered self-healing patches, and automated multi-cloud deployment — designed to run 100% inside your terminal with rich 3D TrueColor aesthetics.
 
 ---
 
-## 🏛️ System Architecture
+## ⚡ Instant Terminal CLI Install (Zero-Clone)
+
+Any user can install and run the **DeployMind (`ai-devops`)** terminal agent globally with a single command — **no repository cloning needed**:
+
+### Option 1: Install with `pip`
+```bash
+pip install https://github.com/ganeshbirajdar286/DeployMind/releases/download/v0.1.0/ai_devops_agent-0.1.0-py3-none-any.whl
+```
+
+### Option 2: Install with `uv` (Recommended for isolated global CLI tool)
+```bash
+uv tool install https://github.com/ganeshbirajdar286/DeployMind/releases/download/v0.1.0/ai_devops_agent-0.1.0-py3-none-any.whl
+```
+
+### 🚀 Launch Terminal Agent
+```bash
+ai-devops
+```
+*(or alias `agent-engine`)*
+
+---
+
+## 🏛️ Terminal System Architecture
 
 ```mermaid
-flowchart LR
-    subgraph Frontend ["React.js Web Console (apps/web)"]
-        UI["React 18 + Vite + Tailwind CSS"]
-        Redux["Redux Toolkit Store<br/>(system, devops, deploy)"]
-        UI <--> Redux
+flowchart TD
+    subgraph CLI ["💻 Terminal Presentation & UX Layer (ai-devops)"]
+        Banner["3D TrueColor ASCII Banner & Powerline Status Badges"]
+        Prompt["Interactive Repo / Branch / Secret Prompts"]
+        DiffView["Colorized Diff Viewer & Human-in-the-Loop Review Box"]
+        Banner --> Prompt --> DiffView
     end
 
-    subgraph Gateway ["Node.js API Gateway (apps/api)"]
-        Express["Express Server (:5000)<br/>(Helmet, CORS Whitelist, Rate Limiting)"]
-        Prisma["Prisma ORM"]
-        Express --> Prisma
-        Prisma --> Neon[("Neon Serverless PostgreSQL")]
+    subgraph Core ["🧠 Core DevOps Engine (services/agent-engine)"]
+        Analyzer["🔍 Repository Analyzer<br/>(Framework, Language, Monorepo, Port & Healthcheck Detection)"]
+        SecretsMgr["🔐 Secrets & Environment Manager<br/>(Interactive Prompting & Libsodium Encryption)"]
+        Generator["📄 DevOps Bundle Generator<br/>(Jinja2 Multi-Stage Dockerfiles, Compose, CI/CD Workflows)"]
+        
+        Analyzer --> SecretsMgr --> Generator
     end
 
-    subgraph AgentEngine ["Python Agent Engine (services/agent-engine)"]
-        FastAPI["FastAPI Microservice (:8000)"]
-        LangGraph["LangGraph Autonomous Engine"]
-        CloudDeployer["Cloud Deployer (Render + Vercel)"]
-        FastAPI --> LangGraph
-        FastAPI --> CloudDeployer
+    subgraph Sandbox ["🧪 Cloud Sandbox Verification & Self-Healing Loop"]
+        GitPusher["📦 Git Pusher (Creates 'ai-devops-setup' Branch)"]
+        GHRunner["🚀 GitHub Actions Runner (.github/workflows/ai-devops-verify.yml)"]
+        Patcher["🩹 LangGraph AI Patcher<br/>(Diagnoses Build/Boot Errors & Auto-Patches Dockerfile)"]
+        
+        GitPusher --> GHRunner
+        GHRunner -- "Build Failed / Port Unhealthy" --> Patcher
+        Patcher -- "Iterative Patch (Max 3)" --> GitPusher
     end
 
-    Redux -->|REST / Polling| Express
-    Express -->|Inspect / Run / Deploy| FastAPI
-    FastAPI -.->|Webhook Event Callbacks| Express
-    CloudDeployer -->|Backend| Render["Render Web Service"]
-    CloudDeployer -->|Frontend| Vercel["Vercel Project"]
+    subgraph Deployer ["☁️ Multi-Cloud Deployment Engine"]
+        Guard["🛡️ PR Merge Guard (Branch -> 'main')"]
+        Vercel["⚡ Vercel Deployer (Frontend UI / SPAs)"]
+        Render["🚀 Render Deployer (Backend APIs / Microservices)"]
+        Summary["🎉 Live URLs Terminal Summary Box"]
+        
+        Guard --> Vercel
+        Guard --> Render
+        Vercel --> Summary
+        Render --> Summary
+    end
+
+    CLI <--> Core
+    Core --> Sandbox
+    GHRunner -- "100% Health Check Success" --> Deployer
+```
+
+---
+
+## ✨ Key Terminal Capabilities
+
+- **3D TrueColor Terminal UI**: Stylized 6-level gradient typography, Powerline status badges, and rounded Unicode boxes with exact display width alignment.
+- **Deterministic AST Repository Inspection**: Auto-detects React Vite, Next.js, Express, FastAPI, Python, and TypeScript, maps monorepos, and assigns collision-free ports.
+- **Automated DevOps Bundle Generation**: Generates multi-stage production Dockerfiles, orchestrated `docker-compose.yml`, and 5 GitHub Actions workflows (`ai-devops-verify.yml`, `ci.yml`, `dependabot.yml`, `release.yml`, `stale.yml`).
+- **Interactive Terminal Secrets Manager**: Safely prompts for environment variables, loads `.env` files, and encrypts secrets with `libsodium` (`pynacl`) directly into GitHub Actions Secrets.
+- **Autonomous Cloud Sandbox Verification**: Dispatches isolated container builds and curls healthcheck endpoints on GitHub Actions runners.
+- **LangGraph Self-Healing Loop**: If a build fails or healthcheck times out, an AI patcher diagnoses logs, patches the Dockerfile, commits, pushes, and re-tests autonomously.
+- **Multi-Cloud Deployment Promotion**: Deploys verified frontends to Vercel and backends to Render, returning live production URLs.
+
+---
+
+## 🛠️ CLI Command Reference
+
+### 1. Interactive Launch (Zero Arguments)
+```bash
+ai-devops
+```
+*Prompts for repository URL, branch, and GitHub token interactively.*
+
+### 2. Autonomous Cloud Pipeline
+```bash
+ai-devops auto "https://github.com/owner/repo.git" --branch ai-devops-setup --token "<github_token>"
+```
+
+### 3. Inspect Repository Structure
+```bash
+ai-devops inspect ./my-app
+```
+
+### 4. Generate Configuration Files Directly
+```bash
+ai-devops generate ./my-app
+```
+
+### 5. Cloud Deployment (Render & Vercel)
+```bash
+ai-devops deploy ./my-app --repo owner/repo
 ```
 
 ---
 
 ## 🔒 Security Hardening
 
-- **Command Injection Prevention**: Git operations use `child_process.execFile` with argument arrays instead of raw shell string interpolation, combined with strict repository regex validation (`https://github.com/owner/repo`).
-- **Secret Redaction**: Environment secrets (`MOGODB_URL`, `JWT_SECRET`, `RENDER_API_KEY`, `VERCEL_TOKEN`, `DATABASE_URL`) are automatically masked (`ghp_****...`) in database records, webhooks, and live terminal streams.
-- **HTTP Security Headers**: `helmet` enables Content Security Policy, Frameguard, and X-Content-Type-Options.
-- **CORS Protection**: Restricted to trusted local development origins (`http://localhost:5173`) and designated production origins.
-- **Rate Limiting**: `express-rate-limit` prevents denial-of-service on automated build and deploy triggers.
-- **SQL Injection Prevention**: Prisma prepared statements guarantee parameterized queries against Neon PostgreSQL.
+- **Command Injection Prevention**: Git operations use `execFile` argument lists instead of shell string interpolation, combined with strict repository regex validation (`https://github.com/owner/repo`).
+- **Secret Redaction**: Environment secrets (`MONGODB_URL`, `JWT_SECRET`, `RENDER_API_KEY`, `VERCEL_TOKEN`, `DATABASE_URL`) are automatically masked (`ghp_****...`) in database records, webhooks, and live terminal streams.
+- **Direct Libsodium Encryption**: Secrets uploaded to GitHub are encrypted client-side using GitHub's public key before transmission.
 
 ---
 
-## 🚀 Quick Start Guide
+## 🧪 Running Tests
 
-### 1. Configure Neon PostgreSQL (`apps/api/.env`)
-Create a free database on [Neon](https://neon.tech) and paste your connection string in `apps/api/.env`:
-```env
-PORT=5000
-DATABASE_URL="postgresql://neondb_owner:YOUR_PASSWORD@ep-sample-pooler.us-east-2.aws.neon.tech/neondb?sslmode=require"
-AGENT_ENGINE_URL="http://localhost:8000"
-CORS_ORIGIN="http://localhost:5173"
-```
+To run the complete automated test suite (38 unit tests):
 
-To sync your database schema:
-```bash
-npm run prisma:generate
-npm run prisma:push
-```
-
----
-
-### 2. Install Dependencies
-In your terminal, install dependencies for both the API and Web apps:
-```bash
-# Install Node.js API dependencies
-cd apps/api
-npm install
-
-# Install React Web dependencies
-cd ../web
-npm install
-```
-
----
-
-### 3. Launch Services
-
-You can run the three services in separate terminal windows:
-
-#### Terminal 1 — Python FastAPI Agent Engine:
 ```bash
 cd services/agent-engine
-uv run python main.py
-# Engine runs on http://localhost:8000
+uv run pytest
 ```
-
-#### Terminal 2 — Node.js Express API Gateway:
-```bash
-npm run dev:api
-# API runs on http://localhost:5000
-```
-
-#### Terminal 3 — React.js Web Console:
-```bash
-npm run dev:web
-# Web Console runs on http://localhost:5173
-```
-
-Open your browser at **`http://localhost:5173`** to access the AI DevOps Agent Console!

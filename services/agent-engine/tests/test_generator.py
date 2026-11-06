@@ -1,6 +1,6 @@
 from pathlib import Path
-from analyzer.detector import analyze_repository
-from generator.engine import generate_devops_bundle
+from ai_devops_agent.analyzer.detector import analyze_repository
+from ai_devops_agent.generator.engine import generate_devops_bundle
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -48,7 +48,7 @@ def test_generate_fastapi_bundle():
 
 
 def test_generate_bundle_with_ast_packages():
-    from analyzer.models import ProjectAnalysis, ServiceMetadata, FrameworkType, Language, PackageManager
+    from ai_devops_agent.analyzer.models import ProjectAnalysis, ServiceMetadata, FrameworkType, Language, PackageManager
 
     analysis = ProjectAnalysis(
         repo_name="rag-video-test",

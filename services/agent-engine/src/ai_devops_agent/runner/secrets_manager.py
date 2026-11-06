@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Tuple, Optional, List, Dict
 import requests
 from nacl import encoding, public
-from utils.theme import (
+from ai_devops_agent.utils.theme import (
     print_step_box,
     print_box,
     prompt_choice,

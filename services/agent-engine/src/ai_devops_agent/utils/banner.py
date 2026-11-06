@@ -1,6 +1,6 @@
 import sys
 import os
-from utils.theme import str_width
+from ai_devops_agent.utils.theme import str_width
 
 # Ensure Windows terminal standard output uses UTF-8
 if sys.platform == "win32":
