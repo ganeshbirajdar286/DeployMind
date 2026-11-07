@@ -1,6 +1,7 @@
 import difflib
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, List
+from ai_devops_agent.utils.sanitizer import redact_secrets
 
 # ANSI Color Codes
 COLOR_RESET = "\033[0m"
@@ -11,10 +12,19 @@ COLOR_YELLOW = "\033[33m"
 COLOR_BOLD = "\033[1m"
 
 
-def format_colored_diff(filename: str, old_content: str, new_content: str) -> str:
-    """Produces syntax-highlighted terminal diff."""
-    old_lines = old_content.splitlines(keepends=True)
-    new_lines = new_content.splitlines(keepends=True)
+def format_colored_diff(
+    filename: str,
+    old_content: str,
+    new_content: str,
+    custom_secrets: Optional[List[str]] = None,
+) -> str:
+    """Produces syntax-highlighted terminal diff with automated secret redaction."""
+    # Redact secrets before computing or displaying diff
+    old_sanitized = redact_secrets(old_content, custom_secrets=custom_secrets)
+    new_sanitized = redact_secrets(new_content, custom_secrets=custom_secrets)
+
+    old_lines = old_sanitized.splitlines(keepends=True)
+    new_lines = new_sanitized.splitlines(keepends=True)
 
     diff = list(
         difflib.unified_diff(
@@ -47,11 +57,16 @@ def format_colored_diff(filename: str, old_content: str, new_content: str) -> st
         else:
             output.append(line_clean)
 
-    return "\n".join(output) + "\n"
+    diff_str = "\n".join(output) + "\n"
+    return redact_secrets(diff_str, custom_secrets=custom_secrets)
 
 
-def display_bundle_diffs(target_dir: Path, artifacts: Dict[str, str]):
-    """Displays terminal diff for all files in the generated DevOps bundle."""
+def display_bundle_diffs(
+    target_dir: Path,
+    artifacts: Dict[str, str],
+    custom_secrets: Optional[List[str]] = None,
+):
+    """Displays terminal diff for all files in the generated DevOps bundle with secret masking."""
     target_dir = Path(target_dir).resolve()
     print("\n" + "=" * 60)
     print(f"📄 Proposed DevOps Configuration Diffs ({len(artifacts)} files)")
@@ -66,5 +81,5 @@ def display_bundle_diffs(target_dir: Path, artifacts: Dict[str, str]):
             except Exception:
                 old_content = ""
 
-        diff_str = format_colored_diff(rel_path, old_content, new_content)
+        diff_str = format_colored_diff(rel_path, old_content, new_content, custom_secrets=custom_secrets)
         print(diff_str)

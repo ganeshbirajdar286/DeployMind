@@ -14,6 +14,7 @@ from ai_devops_agent.runner.secrets_manager import GitHubSecretsManager
 from ai_devops_agent.runner.git_pusher import GitPusher
 from ai_devops_agent.runner.github_runner import GitHubActionsRunner
 from ai_devops_agent.utils.diff_viewer import display_bundle_diffs
+from ai_devops_agent.utils.sanitizer import redact_secrets, sanitize_url_for_logging
 from ai_devops_agent.utils.theme import (
     print_powerline_header,
     print_step_box,
@@ -180,7 +181,8 @@ def resolve_target_workspace(
         )
 
         if res.returncode != 0:
-            print(f"ERROR: Failed to clone {github_slug}: {res.stderr}")
+            clean_err = sanitize_url_for_logging(redact_secrets(res.stderr, custom_secrets=[token] if token else None))
+            print(f"ERROR: Failed to clone {github_slug}: {clean_err}")
             sys.exit(1)
 
         print("[Auto-Clone] Repository cloned successfully.\n")
@@ -277,7 +279,8 @@ def run_autonomous_pipeline(
         )
 
         # 4. Display Syntax-Highlighted Terminal Diffs
-        display_bundle_diffs(target_path, artifacts)
+        known_secret_vals = list(configured_secrets.values()) if configured_secrets else []
+        display_bundle_diffs(target_path, artifacts, custom_secrets=known_secret_vals)
 
         # 5. Human-in-the-Loop Approval & Interactive Editing
         while True:
@@ -299,10 +302,10 @@ def run_autonomous_pipeline(
 
             if confirm in ("e", "edit"):
                 artifacts = interactive_edit_bundle(target_path, artifacts)
-                display_bundle_diffs(target_path, artifacts)
+                display_bundle_diffs(target_path, artifacts, custom_secrets=known_secret_vals)
                 continue
             elif confirm in ("v", "view", "diff"):
-                display_bundle_diffs(target_path, artifacts)
+                display_bundle_diffs(target_path, artifacts, custom_secrets=known_secret_vals)
                 continue
             elif confirm in ("n", "no", "q", "quit", "abort"):
                 print("\n[Aborted] No changes committed. Exiting cleanly.\n")
@@ -379,7 +382,7 @@ def run_autonomous_pipeline(
                 health_port=primary_port,
                 health_path=primary_health_path,
                 commit_sha=head_sha,
-                log_callback=print,
+                log_callback=lambda msg: print(redact_secrets(msg, custom_secrets=known_secret_vals)),
                 exclude_run_ids=seen_run_ids,
             )
 

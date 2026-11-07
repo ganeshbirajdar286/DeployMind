@@ -108,6 +108,9 @@ def generate_patch_node(state: PatcherState) -> dict:
     missing_mod = state.get("missing_module")
     retries = state.get("internal_retries", 0) + 1
 
+    sanitized_error = error_tail[-2000:] if len(error_tail) > 2000 else error_tail
+    sanitized_error = sanitized_error.replace("```", "'''")
+
     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 
     if api_key:
@@ -126,10 +129,11 @@ Diagnosis: {state.get('diagnosis')}
 {current_dockerfile}
 
 === ACTUAL CONTAINER RUNTIME LOGS ===
-{error_tail}
+{sanitized_error}
 
 Task:
 Fix the Dockerfile so that the application boots without error. If a Python package is missing, add 'RUN pip install <package>'.
+Maintain non-root USER execution and do not introduce unverified external shell scripts.
 
 Return ONLY a JSON response:
 {{
@@ -258,8 +262,9 @@ Return ONLY a JSON response:
 
 
 def verify_patch_syntax_node(state: PatcherState) -> dict:
-    """Node 3: Validates that the patched Dockerfile maintains valid Dockerfile syntax."""
+    """Node 3: Validates that the patched Dockerfile maintains valid syntax and conforms to security policy."""
     patched = state.get("updated_dockerfile", "")
+    original = state.get("current_dockerfile", "")
     errors = []
 
     has_from = False
@@ -272,10 +277,22 @@ def verify_patch_syntax_node(state: PatcherState) -> dict:
         elif stripped.startswith("CMD ") or stripped.startswith("ENTRYPOINT "):
             has_cmd_or_entrypoint = True
 
+        # Security Policy 1: Block unverified curl/wget piped directly to shell
+        if re.search(r"(?:curl|wget)\s+[^|]+\|\s*(?:sh|bash|zsh)", stripped, re.IGNORECASE):
+            errors.append("Security Violation: Disallowed unverified curl/wget piped to shell.")
+
+        # Security Policy 2: Block sudo inside container builds
+        if stripped.startswith("RUN sudo ") or " sudo " in stripped:
+            errors.append("Security Violation: Sudo execution is disallowed in container builds.")
+
     if not has_from:
         errors.append("Missing mandatory 'FROM' instruction.")
     if not has_cmd_or_entrypoint:
         errors.append("Missing mandatory 'CMD' or 'ENTRYPOINT' instruction.")
+
+    # Security Policy 3: If original had non-root USER, ensure it is preserved
+    if "USER " in original and "USER " not in patched:
+        errors.append("Security Violation: Non-root USER directive was removed from the container.")
 
     is_valid = len(errors) == 0
 

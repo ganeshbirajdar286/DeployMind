@@ -1,12 +1,14 @@
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Tuple, Optional, Dict
 import requests
+from ai_devops_agent.utils.sanitizer import redact_secrets, sanitize_url_for_logging
 
 
 class GitPusher:
-    """Automates Git branch creation, committing, pushing, and Pull Request workflows."""
+    """Automates Git branch creation, committing, pushing, and Pull Request workflows with security hardening."""
 
     def __init__(self, token: Optional[str] = None):
         self.token = token or os.getenv("GITHUB_TOKEN")
@@ -29,11 +31,17 @@ class GitPusher:
         commit_message: str = "chore: add AI-generated DevOps and cloud sandbox configurations",
         github_repo: Optional[str] = None,
     ) -> Tuple[bool, str]:
-        """Creates branch, stages files, commits, and pushes to remote."""
+        """Creates branch, stages files, commits, and pushes to remote with secret leak prevention."""
         repo_dir = Path(repo_dir).resolve()
+
+        # 0. Branch name validation (prevent option injection or path traversal)
+        if not re.match(r"^[a-zA-Z0-9_\-\./]+$", branch_name) or branch_name.startswith("-") or ".." in branch_name:
+            return False, f"Invalid or unsafe branch name: '{branch_name}'"
 
         if not (repo_dir / ".git").exists():
             return False, f"Directory is not a git repository: {repo_dir}"
+
+        custom_secrets = [self.token] if self.token else []
 
         try:
             # 1. Checkout new branch
@@ -42,20 +50,30 @@ class GitPusher:
             # 2. Add all files
             subprocess.run(["git", "add", "."], cwd=repo_dir, check=True, capture_output=True, text=True)
 
-            # Security safeguard: Never stage or commit .env files containing plain-text secrets
-            subprocess.run(["git", "reset", ".env", ".env.local", ".env.*.local"], cwd=repo_dir, capture_output=True, text=True)
+            # Security safeguard: Prevent staging/committing any .env files anywhere in the workspace tree
+            staged_res = subprocess.run(["git", "diff", "--cached", "--name-only"], cwd=repo_dir, capture_output=True, text=True)
+            staged_files = staged_res.stdout.splitlines() if staged_res.stdout else []
+
+            env_files_to_unstage = [
+                f for f in staged_files
+                if f.endswith(".env") or "/.env" in f or "\\.env" in f or ".env." in f or f.startswith(".env")
+            ]
+            if env_files_to_unstage:
+                subprocess.run(
+                    ["git", "reset", "HEAD", "--"] + env_files_to_unstage,
+                    cwd=repo_dir,
+                    capture_output=True,
+                    text=True,
+                )
 
             # 3. Check if there are changes to commit
             status_res = subprocess.run(["git", "status", "--porcelain"], cwd=repo_dir, capture_output=True, text=True)
             if status_res.stdout.strip():
-                # Commit changes
                 subprocess.run(["git", "commit", "-m", commit_message], cwd=repo_dir, check=True, capture_output=True, text=True)
 
             # 4. Determine Push Remote / URL
-            # Note: --force is used because the setup branch is an ephemeral automated branch
             push_cmd = ["git", "push", "-u", "--force", "origin", branch_name]
 
-            # If token and repo are provided, inject authenticated remote URL
             if self.token and github_repo:
                 auth_url = f"https://x-access-token:{self.token}@github.com/{github_repo}.git"
                 push_cmd = ["git", "push", "-u", "--force", auth_url, branch_name]
@@ -64,13 +82,17 @@ class GitPusher:
             if push_res.returncode == 0:
                 return True, f"Successfully pushed branch '{branch_name}' to GitHub."
             else:
-                return False, push_res.stderr or push_res.stdout
+                raw_err = push_res.stderr or push_res.stdout or "Git push rejected"
+                clean_err = sanitize_url_for_logging(redact_secrets(raw_err, custom_secrets=custom_secrets))
+                return False, clean_err
 
         except subprocess.CalledProcessError as e:
             err = e.stderr or str(e)
-            return False, f"Git command failed: {err}"
+            clean_err = sanitize_url_for_logging(redact_secrets(err, custom_secrets=custom_secrets))
+            return False, f"Git command failed: {clean_err}"
         except Exception as ex:
-            return False, f"Error pushing to GitHub: {str(ex)}"
+            clean_err = sanitize_url_for_logging(redact_secrets(str(ex), custom_secrets=custom_secrets))
+            return False, f"Error pushing to GitHub: {clean_err}"
 
     def get_head_sha(self, repo_dir: Path) -> Optional[str]:
         """Returns the latest commit hash (HEAD) for the repository."""

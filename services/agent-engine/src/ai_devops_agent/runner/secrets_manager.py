@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Tuple, Optional, List, Dict
 import requests
 from nacl import encoding, public
+from ai_devops_agent.utils.sanitizer import is_sensitive_key
 from ai_devops_agent.utils.theme import (
     print_step_box,
     print_box,
@@ -214,8 +215,15 @@ class GitHubSecretsManager:
                 if existing_val:
                     prompt_label += f" [press Enter to keep existing]"
 
+                is_sec = is_sensitive_key(var_name)
                 try:
-                    val = input(f"{prompt_label}: ").strip()
+                    if is_sec:
+                        try:
+                            val = getpass.getpass(f"{prompt_label} (hidden): ").strip()
+                        except Exception:
+                            val = input(f"{prompt_label}: ").strip()
+                    else:
+                        val = input(f"{prompt_label}: ").strip()
                 except Exception:
                     val = ""
 
@@ -247,7 +255,13 @@ class GitHubSecretsManager:
                     if not k:
                         break
                     try:
-                        v = input(f"  Value for '{k}': ").strip()
+                        if is_sensitive_key(k):
+                            try:
+                                v = getpass.getpass(f"  Value for '{k}' (hidden): ").strip()
+                            except Exception:
+                                v = input(f"  Value for '{k}': ").strip()
+                        else:
+                            v = input(f"  Value for '{k}': ").strip()
                     except Exception:
                         v = ""
                     if k and v:
@@ -314,6 +328,17 @@ class GitHubSecretsManager:
                     env_file.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
                 except Exception:
                     pass
+
+            # Ensure .gitignore prevents committing .env files
+            try:
+                gi_file = Path(local_env_dir) / ".gitignore"
+                gi_content = gi_file.read_text(encoding="utf-8") if gi_file.exists() else ""
+                missing_patterns = [p for p in [".env", "*.env", ".env.*"] if p not in gi_content]
+                if missing_patterns:
+                    with open(gi_file, "a", encoding="utf-8") as f:
+                        f.write("\n# Security: Environment variables and secrets\n" + "\n".join(missing_patterns) + "\n")
+            except Exception:
+                pass
 
             print(f"  [OK] Synchronized {len(collected_values)} variable(s) into local workspace '.env'.")
 

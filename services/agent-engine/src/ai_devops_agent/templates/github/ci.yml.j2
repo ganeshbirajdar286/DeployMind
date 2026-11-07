@@ -148,13 +148,13 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run Trivy Vulnerability & Secret Scanner
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@0.28.0
         with:
           scan-type: 'fs'
           ignore-unfixed: true
           format: 'table'
           severity: 'CRITICAL,HIGH'
-        continue-on-error: true
+          exit-code: 1
 
   # ==========================================
   # 5. Building Container Images (GHCR)

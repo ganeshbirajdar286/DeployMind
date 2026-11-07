@@ -31,10 +31,14 @@ RUN {{ build_command | default('npm run build') }}
 # ==========================================
 FROM nginx:alpine AS runner
 
-# Support client-side SPA routing (fallback to index.html)
+# Support client-side SPA routing and security hardening headers
 RUN printf 'server {\n\
-    listen 80;\n\
+    listen {{ default_port | default(80) }};\n\
     server_name _;\n\
+    server_tokens off;\n\
+    add_header X-Frame-Options "SAMEORIGIN" always;\n\
+    add_header X-Content-Type-Options "nosniff" always;\n\
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;\n\
     root /usr/share/nginx/html;\n\
     index index.html;\n\
     location / {\n\

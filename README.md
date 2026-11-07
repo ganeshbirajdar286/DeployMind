@@ -8,14 +8,14 @@ An autonomous, terminal-native AI DevOps platform with deterministic AST reposit
 
 Any user can install and run the **DeployMind (`ai-devops`)** terminal agent globally with a single command — **no repository cloning needed**:
 
-### Option 1: Install with `pip`
-```bash
-pip install  --force https://github.com/ganeshbirajdar286/DeployMind/releases/download/v0.1.0/ai_devops_agent-0.1.0-py3-none-any.whl
-```
-
-### Option 2: Install with `uv` (Recommended for isolated global CLI tool)
+### Option 1: Install with `uv` (Recommended for isolated global CLI tool)
 ```bash
 uv tool install --force https://github.com/ganeshbirajdar286/DeployMind/releases/download/v0.1.1/ai_devops_agent-0.1.1-py3-none-any.whl
+```
+
+### Option 2: Install with `pip`
+```bash
+pip install https://github.com/ganeshbirajdar286/DeployMind/releases/download/v0.1.1/ai_devops_agent-0.1.1-py3-none-any.whl
 ```
 
 ### 🚀 Launch Terminal Agent
