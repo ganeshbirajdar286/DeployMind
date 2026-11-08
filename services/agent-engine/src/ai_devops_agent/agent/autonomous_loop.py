@@ -508,12 +508,16 @@ def align_project_codebase(
     analysis: Any,
     error_context: str = "",
     artifacts: Optional[Dict[str, str]] = None,
+    primary_port: int = 8000,
+    primary_health_path: str = "/",
 ) -> CodebaseAlignmentResult:
     """
     Replit-style whole-codebase alignment engine.
     Scans and cross-analyzes all configuration and source files across the project
-    to resolve discrepancies between application code, container settings, and database environment.
+    to resolve discrepancies between application code, container settings, ports, and database environment.
+    Supports Express.js / Node.js, Django / Python, and generic containerized web architectures.
     """
+    import json
     artifacts = artifacts or {}
     file_changes: Dict[str, str] = {}
     explanations: Dict[str, str] = {}
@@ -527,79 +531,165 @@ def align_project_codebase(
 
     framework = analysis.services[0].framework.value if (analysis and analysis.services) else ""
     is_django = "django" in framework.lower() or any(target_path.rglob("manage.py"))
+    is_node = (
+        any(k in framework.lower() for k in ["express", "node", "nest", "fastify", "koa", "next"])
+        or (target_path / "package.json").exists()
+        or any(target_path.rglob("package.json"))
+    )
+
+    app_port = 8000
+    if analysis and analysis.services and analysis.services[0].default_port:
+        app_port = analysis.services[0].default_port
+    elif is_node:
+        app_port = 3000
+    elif is_django:
+        app_port = 8000
+
+    health_port = primary_port or app_port
 
     # 1. Inspect and Align Django settings.py
-    settings_files = [
-        p for p in target_path.rglob("*settings*.py")
-        if not any(ign in p.parts for ign in [".git", "node_modules", "__pycache__", ".venv", "venv"])
-    ]
-    if settings_files:
-        settings_file = sorted(settings_files, key=lambda p: len(p.parts))[0]
-        rel_settings = str(settings_file.relative_to(target_path)).replace("\\", "/")
-        try:
-            content = settings_file.read_text(encoding="utf-8", errors="ignore")
-            updated = content
-            changed = False
+    if is_django:
+        settings_files = [
+            p for p in target_path.rglob("*settings*.py")
+            if not any(ign in p.parts for ign in [".git", "node_modules", "__pycache__", ".venv", "venv"])
+        ]
+        if settings_files:
+            settings_file = sorted(settings_files, key=lambda p: len(p.parts))[0]
+            rel_settings = str(settings_file.relative_to(target_path)).replace("\\", "/")
+            try:
+                content = settings_file.read_text(encoding="utf-8", errors="ignore")
+                updated = content
+                changed = False
 
-            # Check ALLOWED_HOSTS
-            if "ALLOWED_HOSTS = []" in updated or "ALLOWED_HOSTS=[]" in updated or "ALLOWED_HOSTS = ['localhost']" in updated:
-                updated = re.sub(
-                    r"ALLOWED_HOSTS\s*=\s*\[.*?\]",
-                    "ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', '*').split(',') if os.environ.get('ALLOWED_HOSTS') else ['*']",
-                    updated,
-                    flags=re.DOTALL,
-                )
-                if "import os" not in updated:
-                    updated = "import os\n" + updated
-                changed = True
-                misalignments.append(f"{rel_settings}: ALLOWED_HOSTS was empty or restricted to localhost.")
-                explanations[rel_settings] = "Configured ALLOWED_HOSTS = ['*'] for container networking."
-
-            # Check DATABASES
-            has_localhost_db = "'HOST': 'localhost'" in updated or '"HOST": "localhost"' in updated or "'HOST': ''" in updated
-            has_no_sqlite_fallback = "USE_SQLITE" not in updated and "sqlite3" not in updated
-            if is_db_refused or has_localhost_db or has_no_sqlite_fallback:
-                db_block = (
-                    "# Database configuration with dynamic environment & SQLite fallback\n"
-                    "DB_HOST = os.environ.get('DB_HOST', 'db')\n"
-                    "DB_NAME = os.environ.get('DB_NAME', 'postgres')\n"
-                    "DB_USER = os.environ.get('DB_USER', 'postgres')\n"
-                    "DB_PASSWORD = os.environ.get('DB_PASSWORD', '1234')\n"
-                    "DB_PORT = os.environ.get('DB_PORT', '5432')\n\n"
-                    "if os.environ.get('USE_SQLITE', 'false').lower() in ('true', '1') or not DB_HOST:\n"
-                    "    DATABASES = {\n"
-                    "        'default': {\n"
-                    "            'ENGINE': 'django.db.backends.sqlite3',\n"
-                    "            'NAME': os.path.join(BASE_DIR, 'db.sqlite3'),\n"
-                    "        }\n"
-                    "    }\n"
-                    "else:\n"
-                    "    DATABASES = {\n"
-                    "        'default': {\n"
-                    "            'ENGINE': 'django.db.backends.postgresql',\n"
-                    "            'NAME': DB_NAME,\n"
-                    "            'USER': DB_USER,\n"
-                    "            'PASSWORD': DB_PASSWORD,\n"
-                    "            'HOST': DB_HOST,\n"
-                    "            'PORT': DB_PORT,\n"
-                    "        }\n"
-                    "    }"
-                )
-                if re.search(r"DATABASES\s*=\s*\{.*?\n\}", updated, flags=re.DOTALL):
-                    updated = re.sub(r"DATABASES\s*=\s*\{.*?\n\}", db_block, updated, flags=re.DOTALL)
+                # Check ALLOWED_HOSTS
+                if "ALLOWED_HOSTS = []" in updated or "ALLOWED_HOSTS=[]" in updated or "ALLOWED_HOSTS = ['localhost']" in updated:
+                    updated = re.sub(
+                        r"ALLOWED_HOSTS\s*=\s*\[.*?\]",
+                        "ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', '*').split(',') if os.environ.get('ALLOWED_HOSTS') else ['*']",
+                        updated,
+                        flags=re.DOTALL,
+                    )
                     if "import os" not in updated:
                         updated = "import os\n" + updated
                     changed = True
-                    misalignments.append(f"{rel_settings}: Database 'HOST' was hardcoded to 'localhost' with no SQLite fallback.")
-                    prev_exp = explanations.get(rel_settings, "")
-                    explanations[rel_settings] = (prev_exp + " " if prev_exp else "") + "Updated DATABASES with dynamic DB_HOST and SQLite fallback."
+                    misalignments.append(f"{rel_settings}: ALLOWED_HOSTS was empty or restricted to localhost.")
+                    explanations[rel_settings] = "Configured ALLOWED_HOSTS = ['*'] for container networking."
 
-            if changed and updated != content:
-                file_changes[rel_settings] = updated
-        except Exception:
-            pass
+                # Check DATABASES
+                has_localhost_db = "'HOST': 'localhost'" in updated or '"HOST": "localhost"' in updated or "'HOST': ''" in updated
+                has_no_sqlite_fallback = "USE_SQLITE" not in updated and "sqlite3" not in updated
+                if is_db_refused or has_localhost_db or has_no_sqlite_fallback:
+                    db_block = (
+                        "# Database configuration with dynamic environment & SQLite fallback\n"
+                        "DB_HOST = os.environ.get('DB_HOST', 'db')\n"
+                        "DB_NAME = os.environ.get('DB_NAME', 'postgres')\n"
+                        "DB_USER = os.environ.get('DB_USER', 'postgres')\n"
+                        "DB_PASSWORD = os.environ.get('DB_PASSWORD', '1234')\n"
+                        "DB_PORT = os.environ.get('DB_PORT', '5432')\n\n"
+                        "if os.environ.get('USE_SQLITE', 'false').lower() in ('true', '1') or not DB_HOST:\n"
+                        "    DATABASES = {\n"
+                        "        'default': {\n"
+                        "            'ENGINE': 'django.db.backends.sqlite3',\n"
+                        "            'NAME': os.path.join(BASE_DIR, 'db.sqlite3'),\n"
+                        "        }\n"
+                        "    }\n"
+                        "else:\n"
+                        "    DATABASES = {\n"
+                        "        'default': {\n"
+                        "            'ENGINE': 'django.db.backends.postgresql',\n"
+                        "            'NAME': DB_NAME,\n"
+                        "            'USER': DB_USER,\n"
+                        "            'PASSWORD': DB_PASSWORD,\n"
+                        "            'HOST': DB_HOST,\n"
+                        "            'PORT': DB_PORT,\n"
+                        "        }\n"
+                        "    }"
+                    )
+                    if re.search(r"DATABASES\s*=\s*\{.*?\n\}", updated, flags=re.DOTALL):
+                        updated = re.sub(r"DATABASES\s*=\s*\{.*?\n\}", db_block, updated, flags=re.DOTALL)
+                        if "import os" not in updated:
+                            updated = "import os\n" + updated
+                        changed = True
+                        misalignments.append(f"{rel_settings}: Database 'HOST' was hardcoded to 'localhost' with no SQLite fallback.")
+                        prev_exp = explanations.get(rel_settings, "")
+                        explanations[rel_settings] = (prev_exp + " " if prev_exp else "") + "Updated DATABASES with dynamic DB_HOST and SQLite fallback."
 
-    # 2. Inspect and Align docker-compose.yml
+                if changed and updated != content:
+                    file_changes[rel_settings] = updated
+            except Exception:
+                pass
+
+    # 2. Inspect and Align Node.js / Express Codebase Files
+    if is_node:
+        # Check package.json for start script
+        pkg_file = target_path / "package.json"
+        if pkg_file.exists():
+            try:
+                pkg_data = json.loads(pkg_file.read_text(encoding="utf-8", errors="ignore"))
+                scripts = pkg_data.get("scripts", {})
+                if not scripts or "start" not in scripts:
+                    entry_f = pkg_data.get("main")
+                    if not entry_f:
+                        for cand in ["server.js", "app.js", "index.js", "src/server.js", "src/index.js", "src/app.js"]:
+                            if (target_path / cand).exists():
+                                entry_f = cand
+                                break
+                    entry_f = entry_f or "server.js"
+                    if "scripts" not in pkg_data:
+                        pkg_data["scripts"] = {}
+                    pkg_data["scripts"]["start"] = f"node {entry_f}"
+                    file_changes["package.json"] = json.dumps(pkg_data, indent=2) + "\n"
+                    misalignments.append("package.json: Missing 'start' script for Docker container startup.")
+                    explanations["package.json"] = f"Configured 'start': 'node {entry_f}' in package.json."
+            except Exception:
+                pass
+
+        # Check server files for 0.0.0.0 host binding & dynamic port
+        server_candidates = [
+            p for p in target_path.rglob("*.js")
+            if not any(ign in p.parts for ign in [".git", "node_modules", "dist", "build"])
+            and p.name in ("server.js", "app.js", "index.js", "main.js")
+        ]
+        for s_file in server_candidates:
+            rel_s = str(s_file.relative_to(target_path)).replace("\\", "/")
+            try:
+                s_content = s_file.read_text(encoding="utf-8", errors="ignore")
+                s_updated = s_content
+                s_changed = False
+
+                # Ensure 0.0.0.0 host binding instead of localhost / 127.0.0.1
+                if ("localhost" in s_updated or "127.0.0.1" in s_updated) and "listen" in s_updated:
+                    if re.search(r"listen\(([^,\)]+),\s*['\"](?:localhost|127\.0\.0\.1)['\"]", s_updated):
+                        s_updated = re.sub(
+                            r"listen\(([^,\)]+),\s*['\"](?:localhost|127\.0\.0\.1)['\"]",
+                            r"listen(\1, '0.0.0.0'",
+                            s_updated,
+                        )
+                        s_changed = True
+                        misalignments.append(f"{rel_s}: Server was bound to 'localhost'/'127.0.0.1' which prevents container traffic.")
+                        explanations[rel_s] = "Updated server.listen to bind to '0.0.0.0' for container networking."
+
+                # Ensure dynamic process.env.PORT support
+                if "process.env.PORT" not in s_updated and "app.listen(" in s_updated:
+                    match_p = re.search(r"app\.listen\((\d+)", s_updated)
+                    if match_p:
+                        hardcoded_p = match_p.group(1)
+                        s_updated = s_updated.replace(
+                            f"app.listen({hardcoded_p}",
+                            f"const PORT = process.env.PORT || {hardcoded_p};\napp.listen(PORT",
+                            1,
+                        )
+                        s_changed = True
+                        misalignments.append(f"{rel_s}: Port was hardcoded to {hardcoded_p} without reading process.env.PORT.")
+                        prev_e = explanations.get(rel_s, "")
+                        explanations[rel_s] = (prev_e + " " if prev_e else "") + f"Added dynamic process.env.PORT fallback to {hardcoded_p}."
+
+                if s_changed and s_updated != s_content:
+                    file_changes[rel_s] = s_updated
+            except Exception:
+                pass
+
+    # 3. Inspect and Align docker-compose.yml
     compose_path = target_path / "docker-compose.yml"
     compose_content = ""
     if compose_path.exists():
@@ -610,10 +700,12 @@ def align_project_codebase(
     elif "docker-compose.yml" in artifacts:
         compose_content = artifacts["docker-compose.yml"]
 
-    if compose_content and is_django:
+    if compose_content:
         updated_compose = compose_content
         changed_compose = False
-        if "image: postgres" not in updated_compose and "services:\n" in updated_compose:
+
+        # Django: PostgreSQL Service Injection
+        if is_django and "image: postgres" not in updated_compose and "services:\n" in updated_compose:
             app_repo_name = analysis.repo_name if analysis else "app"
             pg_block = (
                 "  db:\n"
@@ -651,10 +743,21 @@ def align_project_codebase(
             misalignments.append("docker-compose.yml: Missing dedicated PostgreSQL ('db') service container.")
             explanations["docker-compose.yml"] = "Provisioned PostgreSQL database container ('db') with healthcheck."
 
+        # Port Alignment: Ensure health_port maps to app_port in compose
+        if health_port != app_port:
+            target_port_str = f'"{health_port}:{app_port}"'
+            mismatch_pattern = rf'["\']?{app_port}:{app_port}["\']?'
+            if re.search(mismatch_pattern, updated_compose):
+                updated_compose = re.sub(mismatch_pattern, target_port_str, updated_compose)
+                changed_compose = True
+                misalignments.append(f"docker-compose.yml: Port mapping was '{app_port}:{app_port}' while healthcheck verifies port {health_port}.")
+                prev_e = explanations.get("docker-compose.yml", "")
+                explanations["docker-compose.yml"] = (prev_e + " " if prev_e else "") + f"Updated port mapping to '{health_port}:{app_port}'."
+
         if changed_compose and updated_compose != compose_content:
             file_changes["docker-compose.yml"] = updated_compose
 
-    # 3. Inspect and Align Dockerfile
+    # 4. Inspect and Align Dockerfile
     dockerfile_path = target_path / "Dockerfile"
     dockerfile_content = ""
     if dockerfile_path.exists():
@@ -665,10 +768,12 @@ def align_project_codebase(
     elif "Dockerfile" in artifacts:
         dockerfile_content = artifacts["Dockerfile"]
 
-    if dockerfile_content and is_django:
+    if dockerfile_content:
         updated_df = dockerfile_content
         changed_df = False
-        if "migrate" not in updated_df and 'gunicorn' in updated_df:
+
+        # Django: Database migration before gunicorn
+        if is_django and "migrate" not in updated_df and 'gunicorn' in updated_df:
             updated_df = re.sub(
                 r'CMD\s*\[\s*"gunicorn"',
                 'CMD ["sh", "-c", "python manage.py migrate --noinput || true; exec gunicorn"',
@@ -678,10 +783,18 @@ def align_project_codebase(
             misalignments.append("Dockerfile: Missing database migration execution before application boot.")
             explanations["Dockerfile"] = "Added 'python manage.py migrate --noinput || true' before gunicorn start."
 
+        # Node.js: Expose port and start script
+        if is_node:
+            if f"EXPOSE {app_port}" not in updated_df and "EXPOSE" in updated_df:
+                updated_df = re.sub(r"EXPOSE\s+\d+", f"EXPOSE {app_port}", updated_df)
+                changed_df = True
+                misalignments.append(f"Dockerfile: Container port did not expose application port {app_port}.")
+                explanations["Dockerfile"] = f"Aligned EXPOSE {app_port} in Dockerfile."
+
         if changed_df and updated_df != dockerfile_content:
             file_changes["Dockerfile"] = updated_df
 
-    # 4. Inspect and Align requirements.txt
+    # 5. Inspect and Align requirements.txt (Django / Python)
     reqs_path = target_path / "requirements.txt"
     if reqs_path.exists() and is_django:
         try:
@@ -708,8 +821,12 @@ def align_project_codebase(
             pass
 
     diagnosis = "Analyzed codebase files and detected configuration misalignments."
-    if is_db_refused:
+    if health_port != app_port and ("docker-compose.yml" in file_changes or "Dockerfile" in file_changes):
+        diagnosis = f"Port configuration mismatch between cloud healthcheck probe (Port {health_port}) and service runtime (Port {app_port})."
+    elif is_db_refused:
         diagnosis = "Database connection refusal (HTTP 500) caused by localhost database binding and missing container networking."
+    elif file_changes:
+        diagnosis = f"Detected cross-file configuration misalignments across {len(file_changes)} file(s)."
 
     return CodebaseAlignmentResult(
         diagnosis=diagnosis,
@@ -749,26 +866,35 @@ def classify_user_intent(user_input: str, has_pending_fix: bool = False) -> str:
         return "HELP"
 
     # 4. Whole-codebase alignment trigger (Replit-style)
-    if lower in ("align", "fix", "align codebase", "auto fix", "autofix", "e", "edit"):
+    if lower in ("a", "align", "algin", "fix", "align codebase", "auto fix", "autofix", "sync"):
         return "ALIGN_CODEBASE"
+
+    # 5. Interactive Edit
+    if lower in ("e", "edit"):
+        return "EDIT"
+
+    # 6. Configure Gemini API key on the fly
+    if lower.startswith("set key ") or lower.startswith("set gemini ") or lower.startswith("gemini key "):
+        return "SET_API_KEY"
 
     if (lower.startswith("open ") or lower.startswith("edit ")) and len(cleaned.split()) >= 2:
         return "EDIT_SPECIFIC_FILE"
 
-    # 5. Questions and analytical queries
+    # 7. Questions and analytical queries
     question_triggers = [
         "what", "why", "how", "explain", "tell me", "show me", "where",
-        "is there", "can you", "could you", "help", "diagnose", "check", "describe"
+        "is there", "can you", "could you", "help", "diagnose", "check", "describe",
+        "who are you", "who", "hi", "hello"
     ]
     diagnostic_keywords = [
         "issue", "error", "problem", "fail", "failed", "failure", "broken",
         "crash", "crashed", "bug", "wrong", "500", "404", "status", "traceback",
-        "reason", "why", "what is"
+        "reason", "why", "what is", "name of", "who are you"
     ]
 
     is_question = cleaned.endswith("?") or any(lower.startswith(w + " ") or lower == w for w in question_triggers)
     is_diagnostic = any(w in lower for w in diagnostic_keywords)
-    mentions_direct_file_action = any(w in lower for w in ["change ", "update ", "add ", "remove ", "replace ", "edit ", "write ", "create ", "delete "]) and any(ext in lower for ext in [".py", ".txt", ".yml", ".yaml", ".json", "dockerfile", "compose"])
+    mentions_direct_file_action = any(w in lower for w in ["change ", "update ", "add ", "remove ", "replace ", "write ", "create ", "delete "]) and any(ext in lower for ext in [".py", ".txt", ".yml", ".yaml", ".json", "dockerfile", "compose", ".js", ".ts"])
 
     if (is_question or is_diagnostic) and not mentions_direct_file_action:
         return "QUESTION_OR_DIAGNOSIS"
@@ -786,6 +912,8 @@ def handle_conversational_query(
     artifacts: Optional[Dict[str, str]] = None,
     conversation_history: Optional[List[Dict[str, str]]] = None,
     known_secret_vals: Optional[List[str]] = None,
+    primary_port: int = 8000,
+    primary_health_path: str = "/",
 ) -> Optional[Dict[str, Any]]:
     """
     Answers user questions using full terminal context (logs, repo metadata, files)
@@ -800,9 +928,26 @@ def handle_conversational_query(
     else:
         sanitized_logs = "No failure logs recorded. Verification has not failed."
     framework_name = analysis.services[0].framework.value if (analysis and analysis.services) else "Unknown"
-    default_port = analysis.services[0].default_port if (analysis and analysis.services) else 8000
+    default_port = analysis.services[0].default_port if (analysis and analysis.services) else primary_port
 
+    # 1. Check environment and local .env files for GEMINI_API_KEY
     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        for env_path in [target_path / ".env", Path.cwd() / ".env", Path.home() / ".ai_devops" / ".env"]:
+            if env_path.exists():
+                try:
+                    for line in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                        if line.startswith("GEMINI_API_KEY=") or line.startswith("GOOGLE_API_KEY="):
+                            val = line.split("=", 1)[1].strip().strip("'\"")
+                            if val:
+                                api_key = val
+                                os.environ["GEMINI_API_KEY"] = val
+                                break
+                except Exception:
+                    pass
+            if api_key:
+                break
+
     if api_key:
         try:
             import json
@@ -816,6 +961,7 @@ You have FULL CONTEXT of their terminal session: repository analysis, generated 
 Repository: {detected_repo or 'Local Repository'}
 Branch: {branch_name}
 Framework: {framework_name} (Port: {default_port})
+Cloud Healthcheck Port: {primary_port} (Path: {primary_health_path})
 
 === RECENT RUNTIME / BUILD ERROR LOGS FROM TERMINAL ===
 {sanitized_logs}
@@ -872,9 +1018,98 @@ If no file fix is needed, set "proposed_fix": null.
 
     # Deterministic Context-Aware Diagnostic Engine Fallback
     err_lower = sanitized_logs.lower()
+    q_lower = user_query.lower().strip()
     proposed_fix = None
 
-    # Database connection refusal (e.g. Django postgres connection to localhost failed: Connection refused)
+    # 1. Identity & Capability Queries (e.g. "what is name of this ai", "who are you", "what can you do")
+    if any(tok in q_lower for tok in ["name of", "who are you", "what are you", "what is this ai", "what can you do", "who made", "hello", "hi", "hey"]):
+        print_box(
+            title="🤖 AI DevOps Agent",
+            lines=[
+                f"I am {BOLD}AI DevOps Agent{RESET}, your autonomous AI pair programmer for DevOps and cloud verification.",
+                "",
+                f"{BOLD}Active Session Context:{RESET}",
+                f"  {MUTED}• Repository: {RESET} {BOLD}{WHITE}{detected_repo or 'Local'}{RESET}",
+                f"  {MUTED}• Framework:  {RESET} {CYAN}{framework_name}{RESET} (Port: {default_port})",
+                f"  {MUTED}• Health Port:{RESET} {AMBER}{primary_port}{RESET} (Path: {primary_health_path})",
+                f"  {MUTED}• Branch:     {RESET} {PINK}{branch_name}{RESET}",
+                "",
+                f"{BOLD}What I can do for you:{RESET}",
+                f"  • {EMERALD}[A] Align:{RESET}    Inspect all files and auto-align ports, Dockerfile, compose, and scripts",
+                f"  • {PINK}[E] Edit:{RESET}     Interactive codebase editor (plain English instruction or file opening)",
+                f"  • {WHITE}'what is issue':{RESET} Diagnose cloud sandbox and container failures from real logs",
+                f"  • {CYAN}[R] Re-run:{RESET}   Push changes to GitHub and re-verify container in Cloud Sandbox",
+                f"  • {PURPLE}[P] Push:{RESET}     Commit and push your changes to branch '{branch_name}'",
+                "",
+                f"{MUTED}💡 Tip: Run 'set key <GEMINI_API_KEY>' to enable live multi-turn AI reasoning!{RESET}",
+            ],
+            border_color=CYAN,
+            badge="⚡",
+        )
+        return None
+
+    # 2. Project Architecture Queries (e.g. "what is this app", "explain this repo", "tell me about this project")
+    if any(tok in q_lower for tok in ["what is this app", "explain this repo", "explain the project", "about this project", "tell me about", "what does this do"]):
+        arch_lines = [
+            f"{BOLD}Project Architecture Summary:{RESET}",
+            f"  {MUTED}• Detected Framework:{RESET} {CYAN}{framework_name}{RESET}",
+            f"  {MUTED}• Internal Port:{RESET}      {AMBER}{default_port}{RESET}",
+            f"  {MUTED}• Healthcheck Path:{RESET}   {CYAN}{primary_health_path}{RESET}",
+            "",
+            f"{BOLD}Key Identified Files:{RESET}",
+        ]
+        key_files = list_interesting_files(target_path, artifacts)
+        for kf in key_files[:6]:
+            rel_k = str(kf.relative_to(target_path)).replace("\\", "/")
+            arch_lines.append(f"  {EMERALD}•{RESET} {rel_k}")
+
+        arch_lines.extend([
+            "",
+            f"{BOLD}DevOps Status:{RESET}",
+            f"  • Dockerfile: {'Configured' if (target_path / 'Dockerfile').exists() or 'Dockerfile' in artifacts else 'Not generated'}",
+            f"  • Docker Compose: {'Configured' if (target_path / 'docker-compose.yml').exists() or 'docker-compose.yml' in artifacts else 'Not generated'}",
+            f"  • Cloud Sandbox: {'Configured' if (target_path / '.github/workflows/ai-devops-verify.yml').exists() or '.github/workflows/ai-devops-verify.yml' in artifacts else 'Not generated'}",
+        ])
+        print_box(
+            title="📂 Project & Architecture Overview",
+            lines=arch_lines,
+            border_color=PINK,
+            badge="🏗️",
+        )
+        return None
+
+    # 3. Port Mismatch Diagnosis
+    if primary_port != default_port:
+        compose_f = target_path / "docker-compose.yml"
+        has_mapped_health_port = False
+        if compose_f.exists():
+            try:
+                comp_txt = compose_f.read_text(encoding="utf-8", errors="ignore")
+                has_mapped_health_port = f'"{primary_port}:' in comp_txt or f"'{primary_port}:" in comp_txt or f"{primary_port}:{default_port}" in comp_txt
+            except Exception:
+                pass
+
+        if not has_mapped_health_port:
+            print_box(
+                title="🔍 Diagnosis: Port Configuration Mismatch",
+                lines=[
+                    f"{BOLD}Root Cause:{RESET}",
+                    f"  The Cloud Sandbox healthcheck is probing {CYAN}http://localhost:{primary_port}{primary_health_path}{RESET},",
+                    f"  but your {framework_name} application service listens on internal port {AMBER}{default_port}{RESET}.",
+                    "",
+                    f"{BOLD}Why this fails:{RESET}",
+                    f"  Docker Compose must map host port {primary_port} to container port {default_port} (e.g. '{primary_port}:{default_port}'),",
+                    f"  or the application container must be configured with PORT={primary_port}.",
+                    "",
+                    f"{BOLD}Recommended Solution:{RESET}",
+                    f"  Type {EMERALD}[A]{RESET} to auto-align all ports across docker-compose.yml and Dockerfile.",
+                ],
+                border_color=AMBER,
+                badge="🚨",
+            )
+            return None
+
+    # 4. Database connection refusal (e.g. Django postgres connection to localhost failed: Connection refused)
     if any(token in err_lower for token in ["connection refused", "could not connect to server", "operationalerror", "connection to server at \"localhost\" failed"]) or ("http 500" in err_lower and "psycopg2" in err_lower):
         settings_file = find_target_file(target_path, "settings.py")
         rel_str = str(settings_file.relative_to(target_path)) if settings_file else "settings.py"
@@ -934,31 +1169,32 @@ If no file fix is needed, set "proposed_fix": null.
             title="🔍 Diagnosis: Healthcheck Probe Failed (Port / Startup Issue)",
             lines=[
                 f"{BOLD}Root Cause:{RESET}",
-                f"  The healthcheck probe at {CYAN}http://localhost:{default_port}/{RESET} timed out or failed to connect.",
+                f"  The healthcheck probe at {CYAN}http://localhost:{primary_port}{primary_health_path}{RESET} timed out or failed to connect.",
                 "",
                 f"{BOLD}Possible Reasons:{RESET}",
                 f"  1. The server is binding to 127.0.0.1 instead of {BOLD}0.0.0.0{RESET}.",
                 f"  2. The application port inside the container does not match {CYAN}{default_port}{RESET}.",
                 f"  3. The application crashed during startup.",
                 "",
-                f"Type {PINK}[L]{RESET} to view full container logs, or type instructions to adjust port or Dockerfile.",
+                f"Type {PINK}[L]{RESET} to view full container logs, or type {EMERALD}[A]{RESET} to align codebase ports.",
             ],
             border_color=AMBER,
             badge="⚠️",
         )
 
     else:
+        sample_inst = "Update settings.py to fallback to sqlite3" if "django" in framework_name.lower() else f"Change port to {default_port} in Dockerfile"
         print_box(
-            title="🤖 AI DevOps Terminal Context",
+            title="💡 AI DevOps Guidance",
             lines=[
-                f"{MUTED}Repository:    {RESET} {BOLD}{WHITE}{detected_repo or 'Local'}{RESET}",
-                f"{MUTED}Setup Branch:  {RESET} {PINK}{branch_name}{RESET}",
-                f"{MUTED}Framework:     {RESET} {CYAN}{framework_name}{RESET} (Port: {default_port})",
+                f"{BOLD}Context:{RESET} {CYAN}{framework_name}{RESET} on port {default_port} (Healthcheck: port {primary_port})",
                 "",
                 f"You can instruct the agent to modify any file, inspect logs, re-run verification, or push:",
-                f"  • e.g. 'Update settings.py to fallback to sqlite3 and allow all hosts'",
-                f"  • e.g. 'Change port to 8000 in Dockerfile'",
-                f"  • [{PINK}E{RESET}] Edit file directly   [{CYAN}R{RESET}] Re-run verification   [{PURPLE}P{RESET}] Push to GitHub",
+                f"  • {CYAN}Natural language:{RESET} e.g. '{sample_inst}'",
+                f"  • {EMERALD}[A] Align:{RESET}          ⚡ Auto-align all files across codebase",
+                f"  • {PINK}[E] Edit:{RESET}           Interactive codebase editor or file opener",
+                f"  • {CYAN}[R] Re-run:{RESET}         Re-verify container on GitHub Actions",
+                f"  • {WHITE}[L] Logs:{RESET}           View recent failure logs",
             ],
             border_color=CYAN,
             badge="💡",
@@ -1061,6 +1297,11 @@ def run_interactive_agent_session(
             )
             return False
 
+    framework_name = analysis.services[0].framework.value if (analysis and analysis.services) else "Unknown"
+    default_port = analysis.services[0].default_port if (analysis and analysis.services) else primary_port
+
+    sample_example = "e.g. 'Update settings.py to fallback to sqlite3'" if "django" in framework_name.lower() else f"e.g. 'Change port to {primary_port} in Dockerfile'"
+
     print("\n" + "=" * 65)
     print_box(
         title="🤖 AI DevOps Interactive Terminal Agent",
@@ -1073,8 +1314,8 @@ def run_interactive_agent_session(
             f"{BOLD}{WHITE}Session remains active. Ask questions or enter commands below:{RESET}",
             f"  • {BOLD}Ask anything:{RESET}   e.g. 'what is issue', 'why did it fail', 'how to fix this'",
             f"  • {EMERALD}[A] Align:{RESET}      ⚡ Auto-align all files across codebase (Replit-style)",
-            f"  • {BOLD}Plain English:{RESET}  e.g. 'Update settings.py to fallback to sqlite3'",
-            f"  • {PINK}[E] Edit:{RESET}       Auto-align codebase or open specific file ('open settings.py')",
+            f"  • {BOLD}Plain English:{RESET}  {sample_example}",
+            f"  • {PINK}[E] Edit:{RESET}       Auto-align codebase or open interactive editor",
             f"  • {CYAN}[R] Re-run:{RESET}     Commit, push, and re-run Cloud Sandbox Verification",
             f"  • {PURPLE}[P] Push:{RESET}     Commit and push changes to GitHub branch",
             f"  • {EMERALD}[D] Deploy:{RESET}   Deploy verified app to Cloud (Render/Vercel)",
@@ -1102,7 +1343,7 @@ def run_interactive_agent_session(
         if intent == "APPLY_PENDING_FIX" and pending_fix:
             target_file = pending_fix["file_path"]
             fix_instruction = pending_fix["instruction"]
-            rel_path_str = str(target_file.relative_to(target_path))
+            rel_path_str = str(target_file.relative_to(target_path)).replace("\\", "/")
             print(f"\n{INDIGO}Applying proposed fix to {BOLD}{CYAN}{rel_path_str}{RESET}...")
 
             success, explanation, new_content = apply_ai_instruction_to_file(
@@ -1158,30 +1399,44 @@ def run_interactive_agent_session(
                     f"  • {CYAN}'what is issue'{RESET}        -> Diagnoses error logs and explains failure",
                     f"  • {CYAN}'why did it fail'{RESET}      -> Root cause analysis of container / probe",
                     f"  • {CYAN}'how to fix this'{RESET}      -> Proposes code changes and can apply them",
-                    f"  • {CYAN}'update settings.py'{RESET}   -> Edits file directly with diff preview",
+                    f"  • {CYAN}'who are you'{RESET}          -> AI Agent capabilities and session status",
                     "",
                     f"{BOLD}{WHITE}Direct action shortcuts:{RESET}",
-                    f"  • {PINK}[E] Edit:{RESET}   Open file in your local editor (VS Code, Notepad)",
-                    f"  • {CYAN}[R] Re-run:{RESET} Commit, push, and re-run Cloud Sandbox Verification",
-                    f"  • {PURPLE}[P] Push:{RESET}   Commit and push changes to GitHub branch",
-                    f"  • {EMERALD}[D] Deploy:{RESET} Deploy verified app to Cloud (Render / Vercel)",
-                    f"  • {AMBER}[S] Status:{RESET} View git status and modified files",
-                    f"  • {WHITE}[L] Logs:{RESET}   View recent container and probe failure logs",
-                    f"  • {RED}[Q] Quit:{RESET}   Exit application cleanly",
+                    f"  • {EMERALD}[A] Align:{RESET}   Auto-align all files across codebase (Replit-style)",
+                    f"  • {PINK}[E] Edit:{RESET}    Interactive codebase editor or file opener",
+                    f"  • {CYAN}[R] Re-run:{RESET}  Commit, push, and re-run Cloud Sandbox Verification",
+                    f"  • {PURPLE}[P] Push:{RESET}    Commit and push changes to GitHub branch",
+                    f"  • {EMERALD}[D] Deploy:{RESET}  Deploy verified app to Cloud (Render / Vercel)",
+                    f"  • {AMBER}[S] Status:{RESET}  View git status and modified files",
+                    f"  • {WHITE}[L] Logs:{RESET}    View recent container and probe failure logs",
+                    f"  • {RED}[Q] Quit:{RESET}    Exit application cleanly",
                 ],
                 border_color=PINK,
                 badge="💡",
             )
             continue
 
-        # 4. Whole-Codebase Alignment (Replit-style) OR Diagnostic Query (e.g. "what is issue", "why did it fail")
-        if intent in ("ALIGN_CODEBASE", "QUESTION_OR_DIAGNOSIS"):
+        # 4. Set Gemini API Key on the fly
+        if intent == "SET_API_KEY":
+            parts = user_input.split()
+            if len(parts) >= 3:
+                key_val = parts[2].strip()
+                os.environ["GEMINI_API_KEY"] = key_val
+                print(f"  {EMERALD}✔ Gemini API Key configured! Live conversational reasoning is now enabled.{RESET}")
+            else:
+                print(f"  {AMBER}Usage: set key <YOUR_GEMINI_API_KEY>{RESET}")
+            continue
+
+        # 5. Whole-Codebase Alignment (Triggered by 'a', 'align', 'fix', etc.)
+        if intent == "ALIGN_CODEBASE":
             conversation_history.append({"role": "user", "content": user_input})
             alignment = align_project_codebase(
                 target_path=target_path,
                 analysis=analysis,
                 error_context=last_error_logs,
                 artifacts=artifacts,
+                primary_port=primary_port,
+                primary_health_path=primary_health_path,
             )
 
             if alignment.file_changes:
@@ -1222,69 +1477,185 @@ def run_interactive_agent_session(
 
                     print(f"\n{BOLD}{EMERALD}All project files aligned successfully!{RESET}")
                     if detected_repo and token:
-                        trigger_rerun(commit_msg="fix(codebase): align settings, compose, and dockerfile for container runtime")
+                        trigger_rerun(commit_msg="fix(codebase): align ports, Dockerfile, and configurations")
                 else:
                     print(f"  {MUTED}[Codebase alignment changes discarded]{RESET}")
-                continue
-
-            # If no automated alignment changes detected, fall back to conversational query
-            if intent == "QUESTION_OR_DIAGNOSIS":
-                proposed = handle_conversational_query(
-                    user_query=user_input,
-                    target_path=target_path,
-                    analysis=analysis,
-                    detected_repo=detected_repo,
-                    branch_name=branch_name,
-                    last_error_logs=last_error_logs,
-                    artifacts=artifacts,
-                    conversation_history=conversation_history,
-                    known_secret_vals=known_secret_vals,
-                )
-
-                if proposed and proposed.get("file_path") and proposed["file_path"].exists():
-                    pending_fix = proposed
-                    rel_f = proposed["file_path"].relative_to(target_path)
-                    confirm_fix = prompt_choice(f"Would you like me to apply this fix to '{rel_f}' now? [Y/n]", default="Y").lower()
-                    if confirm_fix in ("y", "yes", ""):
-                        target_file = proposed["file_path"]
-                        rel_path_str = str(rel_f)
-                        success, explanation, new_content = apply_ai_instruction_to_file(
-                            file_path=target_file,
-                            instruction=proposed["instruction"],
-                            error_context=last_error_logs,
-                        )
-                        pending_fix = None
-                        if success:
-                            old_content = target_file.read_text(encoding="utf-8", errors="ignore")
-                            diff_str = format_colored_diff(
-                                rel_path_str,
-                                old_content,
-                                new_content,
-                                custom_secrets=known_secret_vals,
-                            )
-                            print(diff_str)
-                            print(f"{BOLD}{EMERALD}AI Plan:{RESET} {explanation}")
-
-                            apply_choice = prompt_choice("Apply these changes to disk? [Y]es / [E]dit in editor / [N]o", default="Y").lower()
-                            if apply_choice in ("y", "yes", ""):
-                                target_file.write_text(new_content, encoding="utf-8")
-                                if rel_path_str in artifacts:
-                                    artifacts[rel_path_str] = new_content
-                                print(f"  {EMERALD}✔ Saved changes to '{rel_path_str}'!{RESET}")
-
-                                if detected_repo and token:
-                                    rerun_choice = prompt_choice("Push changes and re-run Cloud Sandbox Verification now? [Y/n]", default="Y").lower()
-                                    if rerun_choice in ("y", "yes", ""):
-                                        trigger_rerun(commit_msg=f"fix: {proposed['instruction'][:60]}")
-                            elif apply_choice in ("e", "edit"):
-                                target_file.write_text(new_content, encoding="utf-8")
-                                open_file_in_editor(target_file)
-                            else:
-                                print(f"  {MUTED}[Changes discarded]{RESET}")
-                continue
             else:
-                print(f"\n{EMERALD}Codebase configuration files already aligned. No pending misalignments found.{RESET}")
+                framework_str = analysis.services[0].framework.value if (analysis and analysis.services) else "application"
+                print(f"\n{EMERALD}✨ Codebase configuration files are already aligned for {framework_str} (Port: {primary_port}).{RESET}")
+                print(f"{MUTED}No pending discrepancies detected between Dockerfile, docker-compose.yml, and environment.{RESET}")
+            continue
+
+        # 6. Interactive Codebase Editor (Triggered by 'e' or 'edit')
+        if intent == "EDIT":
+            # First check if there are pending misalignments across files
+            alignment = align_project_codebase(
+                target_path=target_path,
+                analysis=analysis,
+                error_context=last_error_logs,
+                artifacts=artifacts,
+                primary_port=primary_port,
+                primary_health_path=primary_health_path,
+            )
+            if alignment.file_changes:
+                diag_lines = [
+                    f"{BOLD}Diagnosis:{RESET}",
+                    f"  {alignment.diagnosis}",
+                    "",
+                    f"{BOLD}Identified Discrepancies across {len(alignment.file_changes)} file(s):{RESET}",
+                ]
+                for mis in alignment.misalignments:
+                    diag_lines.append(f"  {EMERALD}•{RESET} {mis}")
+
+                print_box(
+                    title="⚡ Codebase Alignment Changes Available",
+                    lines=diag_lines,
+                    border_color=CYAN,
+                    badge="🧠",
+                )
+                print(f"\n{BOLD}{WHITE}Proposed Changes Across Your Project:{RESET}")
+                for rel_p, new_text in alignment.file_changes.items():
+                    target_f = target_path / rel_p
+                    old_text = target_f.read_text(encoding="utf-8", errors="ignore") if target_f.exists() else ""
+                    print(format_colored_diff(rel_p, old_text, new_text, custom_secrets=known_secret_vals))
+
+                apply_choice = prompt_choice(
+                    f"Apply these {len(alignment.file_changes)} aligned changes? [Y/n]",
+                    default="Y"
+                ).lower()
+                if apply_choice in ("y", "yes", ""):
+                    for rel_p, new_text in alignment.file_changes.items():
+                        target_f = target_path / rel_p
+                        target_f.parent.mkdir(parents=True, exist_ok=True)
+                        target_f.write_text(new_text, encoding="utf-8")
+                        artifacts[rel_p] = new_text
+                        print(f"  {EMERALD}✔ Updated {rel_p}{RESET}")
+                    print(f"\n{BOLD}{EMERALD}All project files aligned successfully!{RESET}")
+                    if detected_repo and token:
+                        trigger_rerun(commit_msg="fix(codebase): align configurations across project")
+                    continue
+
+            # If no automated alignment changes, provide the Interactive Codebase Editor menu
+            sample_cmd = f"Change port to {primary_port} in Dockerfile" if "express" in framework_name.lower() else "Update settings.py"
+            print_box(
+                title="✏️  Interactive Codebase Editor",
+                lines=[
+                    f"{BOLD}How would you like to edit?{RESET}",
+                    f"  • {CYAN}Enter plain English instruction{RESET} (e.g. '{sample_cmd}')",
+                    f"  • {PINK}Enter filename to open{RESET} in your editor (e.g. 'Dockerfile', 'package.json')",
+                    f"  • {AMBER}Type 'list'{RESET} to browse all repository files",
+                    f"  • {MUTED}Type 'back'{RESET} to return to main menu",
+                ],
+                border_color=PINK,
+                badge="📝",
+            )
+            try:
+                sub_edit = input(f"{BOLD}{PINK}edit> {RESET}").strip()
+            except (KeyboardInterrupt, EOFError):
                 continue
+
+            if not sub_edit or sub_edit.lower() in ("b", "back", "cancel", "q"):
+                continue
+            if sub_edit.lower() in ("l", "list"):
+                chosen_f = interactive_select_file(target_path, artifacts=artifacts)
+                if chosen_f:
+                    open_file_in_editor(chosen_f)
+                continue
+
+            # Check if sub_edit matches an existing file directly
+            cand_f = target_path / sub_edit
+            if cand_f.exists() and cand_f.is_file():
+                open_file_in_editor(cand_f)
+                continue
+
+            # Otherwise, execute user instruction using agent file modification
+            target_f = find_target_file(target_path, sub_edit)
+            if not target_f:
+                target_f = interactive_select_file(target_path, artifacts=artifacts)
+            if target_f:
+                rel_f_str = str(target_f.relative_to(target_path)).replace("\\", "/")
+                print(f"\n{INDIGO}Target File:{RESET} {BOLD}{CYAN}{rel_f_str}{RESET}")
+                ok_mod, exp_mod, new_content = apply_ai_instruction_to_file(
+                    file_path=target_f,
+                    instruction=sub_edit,
+                    error_context=last_error_logs,
+                )
+                if ok_mod:
+                    old_c = target_f.read_text(encoding="utf-8", errors="ignore")
+                    print(format_colored_diff(rel_f_str, old_c, new_content, custom_secrets=known_secret_vals))
+                    print(f"{BOLD}{EMERALD}AI Plan:{RESET} {exp_mod}")
+                    app_c = prompt_choice("Apply these changes to disk? [Y/n]", default="Y").lower()
+                    if app_c in ("y", "yes", ""):
+                        target_f.write_text(new_content, encoding="utf-8")
+                        if rel_f_str in artifacts:
+                            artifacts[rel_f_str] = new_content
+                        print(f"  {EMERALD}✔ Saved changes to '{rel_f_str}'!{RESET}")
+                        if detected_repo and token:
+                            r_c = prompt_choice("Push changes and re-verify now? [Y/n]", default="Y").lower()
+                            if r_c in ("y", "yes", ""):
+                                trigger_rerun(commit_msg=f"fix: {sub_edit[:60]}")
+                else:
+                    print(f"  {AMBER}[!] {exp_mod}{RESET}")
+            continue
+
+        # 7. Conversational Query / Diagnosis ("what is issue", "who are you", etc.)
+        if intent == "QUESTION_OR_DIAGNOSIS":
+            conversation_history.append({"role": "user", "content": user_input})
+            proposed = handle_conversational_query(
+                user_query=user_input,
+                target_path=target_path,
+                analysis=analysis,
+                detected_repo=detected_repo,
+                branch_name=branch_name,
+                last_error_logs=last_error_logs,
+                artifacts=artifacts,
+                conversation_history=conversation_history,
+                known_secret_vals=known_secret_vals,
+                primary_port=primary_port,
+                primary_health_path=primary_health_path,
+            )
+
+            if proposed and proposed.get("file_path") and proposed["file_path"].exists():
+                pending_fix = proposed
+                rel_f = str(proposed["file_path"].relative_to(target_path)).replace("\\", "/")
+                confirm_fix = prompt_choice(f"Would you like me to apply this fix to '{rel_f}' now? [Y/n]", default="Y").lower()
+                if confirm_fix in ("y", "yes", ""):
+                    target_file = proposed["file_path"]
+                    rel_path_str = rel_f
+                    success, explanation, new_content = apply_ai_instruction_to_file(
+                        file_path=target_file,
+                        instruction=proposed["instruction"],
+                        error_context=last_error_logs,
+                    )
+                    pending_fix = None
+                    if success:
+                        old_content = target_file.read_text(encoding="utf-8", errors="ignore")
+                        diff_str = format_colored_diff(
+                            rel_path_str,
+                            old_content,
+                            new_content,
+                            custom_secrets=known_secret_vals,
+                        )
+                        print(diff_str)
+                        print(f"{BOLD}{EMERALD}AI Plan:{RESET} {explanation}")
+
+                        apply_choice = prompt_choice("Apply these changes to disk? [Y]es / [E]dit in editor / [N]o", default="Y").lower()
+                        if apply_choice in ("y", "yes", ""):
+                            target_file.write_text(new_content, encoding="utf-8")
+                            if rel_path_str in artifacts:
+                                artifacts[rel_path_str] = new_content
+                            print(f"  {EMERALD}✔ Saved changes to '{rel_path_str}'!{RESET}")
+
+                            if detected_repo and token:
+                                rerun_choice = prompt_choice("Push changes and re-run Cloud Sandbox Verification now? [Y/n]", default="Y").lower()
+                                if rerun_choice in ("y", "yes", ""):
+                                    trigger_rerun(commit_msg=f"fix: {proposed['instruction'][:60]}")
+                        elif apply_choice in ("e", "edit"):
+                            target_file.write_text(new_content, encoding="utf-8")
+                            open_file_in_editor(target_file)
+                        else:
+                            print(f"  {MUTED}[Changes discarded]{RESET}")
+            continue
 
         # Command: Open specific file in editor
         if intent == "EDIT_SPECIFIC_FILE":

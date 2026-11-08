@@ -239,6 +239,8 @@ def test_classify_user_intent():
     assert classify_user_intent("how to fix this") == "QUESTION_OR_DIAGNOSIS"
     assert classify_user_intent("what failed") == "QUESTION_OR_DIAGNOSIS"
     assert classify_user_intent("what's wrong") == "QUESTION_OR_DIAGNOSIS"
+    assert classify_user_intent("what is name of this ai") == "QUESTION_OR_DIAGNOSIS"
+    assert classify_user_intent("who are you") == "QUESTION_OR_DIAGNOSIS"
 
     # 2. Shortcuts
     assert classify_user_intent("q") == "QUIT"
@@ -249,9 +251,14 @@ def test_classify_user_intent():
     assert classify_user_intent("s") == "STATUS"
     assert classify_user_intent("p") == "PUSH"
     assert classify_user_intent("d") == "DEPLOY"
-    assert classify_user_intent("e") == "ALIGN_CODEBASE"
+    assert classify_user_intent("a") == "ALIGN_CODEBASE"
+    assert classify_user_intent("A") == "ALIGN_CODEBASE"
     assert classify_user_intent("align") == "ALIGN_CODEBASE"
+    assert classify_user_intent("algin") == "ALIGN_CODEBASE"
     assert classify_user_intent("fix") == "ALIGN_CODEBASE"
+    assert classify_user_intent("e") == "EDIT"
+    assert classify_user_intent("edit") == "EDIT"
+    assert classify_user_intent("set key 123456") == "SET_API_KEY"
     assert classify_user_intent("open settings.py") == "EDIT_SPECIFIC_FILE"
     assert classify_user_intent("help") == "HELP"
 
@@ -384,3 +391,117 @@ def test_handle_conversational_query_deterministic_diagnosis():
         assert proposed is not None
         assert proposed["file_path"] == settings_file
         assert "SQLite fallback" in proposed["instruction"]
+
+
+def test_align_project_codebase_node_express():
+    import json
+    from ai_devops_agent.agent.autonomous_loop import align_project_codebase
+    from ai_devops_agent.analyzer.models import ProjectAnalysis, ServiceMetadata, FrameworkType, Language, PackageManager
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+
+        # 1. Express package.json missing "start"
+        pkg_file = tmp_path / "package.json"
+        pkg_file.write_text(json.dumps({
+            "name": "portfolio",
+            "version": "1.0.0",
+            "main": "server.js",
+            "scripts": {}
+        }))
+
+        # 2. server.js binding to localhost
+        server_file = tmp_path / "server.js"
+        server_file.write_text("const express = require('express');\nconst app = express();\napp.listen(3000, 'localhost');\n")
+
+        # 3. docker-compose.yml mapping 3000:3000 while health port is 80
+        compose_file = tmp_path / "docker-compose.yml"
+        compose_file.write_text("version: '3.8'\nservices:\n  web:\n    build: .\n    ports:\n      - \"3000:3000\"\n")
+
+        # 4. Dockerfile
+        df_file = tmp_path / "Dockerfile"
+        df_file.write_text("FROM node:20-alpine\nWORKDIR /app\nEXPOSE 8080\nCMD [\"npm\", \"start\"]\n")
+
+        analysis = ProjectAnalysis(
+            repo_name="portfolio",
+            services=[
+                ServiceMetadata(
+                    name="web",
+                    path=".",
+                    language=Language.JAVASCRIPT,
+                    framework=FrameworkType.EXPRESS,
+                    package_manager=PackageManager.NPM,
+                    default_port=3000,
+                )
+            ]
+        )
+
+        res = align_project_codebase(
+            target_path=tmp_path,
+            analysis=analysis,
+            primary_port=80,
+            error_context="Service did not accept traffic on port 80.",
+        )
+
+        assert len(res.file_changes) >= 3
+        # Port aligned in docker-compose.yml
+        assert "docker-compose.yml" in res.file_changes
+        assert '"80:3000"' in res.file_changes["docker-compose.yml"]
+
+        # server.js bound to 0.0.0.0
+        assert "server.js" in res.file_changes
+        assert "'0.0.0.0'" in res.file_changes["server.js"]
+
+        # package.json has start script
+        assert "package.json" in res.file_changes
+        pkg_res = json.loads(res.file_changes["package.json"])
+        assert pkg_res["scripts"]["start"] == "node server.js"
+
+        # Dockerfile exposes 3000
+        assert "Dockerfile" in res.file_changes
+        assert "EXPOSE 3000" in res.file_changes["Dockerfile"]
+
+
+def test_handle_conversational_query_identity_and_ports():
+    from ai_devops_agent.agent.autonomous_loop import handle_conversational_query
+    from ai_devops_agent.analyzer.models import ProjectAnalysis, ServiceMetadata, FrameworkType, Language, PackageManager
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+
+        analysis = ProjectAnalysis(
+            repo_name="portfolio",
+            services=[
+                ServiceMetadata(
+                    name="web",
+                    path=".",
+                    language=Language.JAVASCRIPT,
+                    framework=FrameworkType.EXPRESS,
+                    package_manager=PackageManager.NPM,
+                    default_port=3000,
+                )
+            ]
+        )
+
+        # 1. Identity query should run without error
+        res1 = handle_conversational_query(
+            user_query="what is name of this ai",
+            target_path=tmp_path,
+            analysis=analysis,
+            detected_repo="ganeshbirajdar286/portfolio",
+            branch_name="ai-devops-setup",
+            primary_port=80,
+        )
+        assert res1 is None  # answered conversationally
+
+        # 2. Port mismatch question should run without error
+        res2 = handle_conversational_query(
+            user_query="what is issue",
+            target_path=tmp_path,
+            analysis=analysis,
+            detected_repo="ganeshbirajdar286/portfolio",
+            branch_name="ai-devops-setup",
+            primary_port=80,
+            last_error_logs="Service did not accept traffic on port 80.",
+        )
+        assert res2 is None  # diagnosed port mismatch
