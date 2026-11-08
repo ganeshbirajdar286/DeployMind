@@ -136,10 +136,18 @@ def generate_devops_bundle(
         s_dict["host_port"] = host_port
         compose_services.append(s_dict)
 
+    has_postgres = any(
+        "psycopg" in str(s.extra_pypi_packages).lower()
+        or "libpq" in str(s.system_packages).lower()
+        or s.framework == FrameworkType.DJANGO
+        for s in analysis.services
+    )
+
     compose_template = env.get_template("compose/docker-compose.yml.j2")
     artifacts["docker-compose.yml"] = compose_template.render(
         repo_name=analysis.repo_name,
         services=compose_services,
+        has_postgres=has_postgres,
     )
 
     # Detect language support across services

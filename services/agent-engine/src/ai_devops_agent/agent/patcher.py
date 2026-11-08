@@ -84,7 +84,10 @@ def diagnose_failure_node(state: PatcherState) -> dict:
     elif any(token in err_lower for token in ["gcc: not found", "python.h: no such file", "build-essential"]):
         category = "MISSING_HEADER"
         diagnosis = "Native C/C++ compilation failed due to missing build-essential or compiler toolchain."
-    elif "psycopg2" in err_lower or "libpq" in err_lower:
+    elif any(token in err_lower for token in ["connection refused", "could not connect to server", "is the server running on that host", "operationalerror: connection to server"]):
+        category = "DATABASE_CONNECTION_REFUSED"
+        diagnosis = "Application runtime failed to connect to database at localhost:5432 (Connection refused). Database service is missing or unreachable from container."
+    elif any(token in err_lower for token in ["libpq-fe.h: no such file", "pg_config executable not found", "error: pg_config not found"]) or (("psycopg2" in err_lower or "libpq" in err_lower) and any(w in err_lower for w in ["fatal error", "command 'gcc' failed", "failed building wheel", "build error"])):
         category = "DATABASE_CLIENT"
         diagnosis = "PostgreSQL client library compilation failed due to missing libpq-dev."
     elif "permission denied" in err_lower:
@@ -219,16 +222,46 @@ Return ONLY a JSON response:
         lines.insert(insert_idx, "RUN apt-get update && apt-get install -y --no-install-recommends build-essential python3-dev && rm -rf /var/lib/apt/lists/*")
         patched = "\n".join(lines)
         patch_explanation = "Injected build-essential and python3-dev into the builder stage."
-    elif category == "DATABASE_CLIENT":
+    elif category == "DATABASE_CONNECTION_REFUSED":
         lines = current_dockerfile.splitlines()
+        env_lines = [
+            "ENV DB_HOST=db",
+            "ENV DATABASE_URL=postgres://postgres:1234@db:5432/postgres",
+            "ENV USE_SQLITE=True"
+        ]
         insert_idx = 1
-        for i, line in enumerate(lines):
-            if line.startswith("WORKDIR"):
-                insert_idx = i + 1
-                break
-        lines.insert(insert_idx, "RUN apt-get update && apt-get install -y --no-install-recommends libpq-dev && rm -rf /var/lib/apt/lists/*")
+        for idx, line in enumerate(lines):
+            if line.startswith("WORKDIR") or line.startswith("ENV "):
+                insert_idx = idx + 1
+        for env_l in reversed(env_lines):
+            if env_l not in current_dockerfile:
+                lines.insert(insert_idx, env_l)
         patched = "\n".join(lines)
-        patch_explanation = "Added libpq-dev for PostgreSQL database driver support."
+        patch_explanation = "Injected DB_HOST=db and fallback environment configuration to resolve database connection refusal."
+    elif category == "DATABASE_CLIENT":
+        if "libpq-dev" in current_dockerfile:
+            # libpq-dev is already installed; this is a runtime connection refusal, not a build header issue
+            lines = current_dockerfile.splitlines()
+            env_lines = ["ENV DB_HOST=db", "ENV USE_SQLITE=True"]
+            insert_idx = 1
+            for idx, line in enumerate(lines):
+                if line.startswith("WORKDIR") or line.startswith("ENV "):
+                    insert_idx = idx + 1
+            for env_l in reversed(env_lines):
+                if env_l not in current_dockerfile:
+                    lines.insert(insert_idx, env_l)
+            patched = "\n".join(lines)
+            patch_explanation = "libpq-dev was already present. Configured DB_HOST=db and SQLite fallback."
+        else:
+            lines = current_dockerfile.splitlines()
+            insert_idx = 1
+            for i, line in enumerate(lines):
+                if line.startswith("WORKDIR"):
+                    insert_idx = i + 1
+                    break
+            lines.insert(insert_idx, "RUN apt-get update && apt-get install -y --no-install-recommends libpq-dev && rm -rf /var/lib/apt/lists/*")
+            patched = "\n".join(lines)
+            patch_explanation = "Added libpq-dev for PostgreSQL database driver support."
     elif category == "MONOREPO_PATH_ALIAS":
         folder = missing_mod or "backend"
         symlink_cmd = f"RUN ln -s /app /{folder} 2>/dev/null || true && ln -s /app /app/{folder} 2>/dev/null || true"

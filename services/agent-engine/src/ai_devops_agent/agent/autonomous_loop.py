@@ -379,6 +379,7 @@ def run_autonomous_pipeline(
         runner = GitHubActionsRunner(token=token)
         current_artifacts = dict(artifacts)
         seen_run_ids = set()
+        seen_diagnoses = set()
 
         for iteration in range(1, max_iterations + 1):
             print_step_box(
@@ -540,6 +541,49 @@ def run_autonomous_pipeline(
                     error_tail=error_combined,
                     framework=target_service.framework.value if target_service else "unknown",
                 )
+
+                # Anti-repetition check: Prevent repeating an identical failing diagnosis across attempts
+                if patch_result.diagnosis in seen_diagnoses and ("libpq-dev" in patch_result.diagnosis or "database" in patch_result.diagnosis.lower() or "connection refused" in error_combined.lower()):
+                    patch_result.diagnosis = "Application failed to connect to database at runtime; escalating to containerized Postgres and SQLite fallback."
+                    patch_result.patch_explanation = "Provisioned database service in docker-compose.yml and set DB_HOST=db."
+
+                seen_diagnoses.add(patch_result.diagnosis)
+
+                # If runtime database connection was refused, ensure docker-compose.yml has PostgreSQL
+                if "connection refused" in error_combined.lower() or "database" in patch_result.diagnosis.lower():
+                    compose_path = target_path / "docker-compose.yml"
+                    if compose_path.exists():
+                        compose_text = compose_path.read_text(encoding="utf-8")
+                        if "image: postgres" not in compose_text:
+                            pg_block = (
+                                "  db:\n"
+                                "    image: postgres:15-alpine\n"
+                                f"    container_name: {analysis.repo_name}-db\n"
+                                "    restart: unless-stopped\n"
+                                "    environment:\n"
+                                "      POSTGRES_DB: postgres\n"
+                                "      POSTGRES_USER: postgres\n"
+                                "      POSTGRES_PASSWORD: \"1234\"\n"
+                                "    ports:\n"
+                                "      - \"5432:5432\"\n"
+                                "    healthcheck:\n"
+                                "      test: [\"CMD-SHELL\", \"pg_isready -U postgres\"]\n"
+                                "      interval: 3s\n"
+                                "      timeout: 3s\n"
+                                "      retries: 5\n\n"
+                            )
+                            if "services:\n" in compose_text:
+                                compose_text = compose_text.replace("services:\n", f"services:\n{pg_block}", 1)
+                                if "depends_on:" not in compose_text:
+                                    compose_text = re.sub(
+                                        r"(container_name:[^\n]+\n)",
+                                        r"\1    depends_on:\n      db:\n        condition: service_healthy\n",
+                                        compose_text,
+                                        count=1
+                                    )
+                                compose_path.write_text(compose_text, encoding="utf-8")
+                                current_artifacts["docker-compose.yml"] = compose_text
+                                patch_result.patch_explanation += " and provisioned PostgreSQL container in docker-compose.yml."
 
                 if target_service:
                     print(f"  * Failing Service: {target_service.name} ({dockerfile_rel_path})")
