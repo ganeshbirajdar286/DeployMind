@@ -1,4 +1,5 @@
 import re
+from pathlib import Path
 from typing import List, Optional, Set
 
 # Regex patterns for common API keys, tokens, and credentials
@@ -69,3 +70,44 @@ def redact_secrets(text: str, custom_secrets: Optional[List[str]] = None) -> str
                 redacted = redacted.replace(secret_clean, "******")
 
     return redacted
+
+
+def sanitize_app_name(name: str) -> str:
+    """Sanitizes an application or project name for compatibility with Vercel and Render."""
+    if not name:
+        return ""
+    # Lowercase, replace non-alphanumeric (except hyphens and underscores) with hyphens
+    cleaned = re.sub(r"[^a-zA-Z0-9_\-]", "-", name.strip().lower())
+    # Collapse multiple consecutive hyphens or underscores to a single hyphen
+    cleaned = re.sub(r"[_\-]+", "-", cleaned)
+    # Strip leading and trailing hyphens
+    cleaned = cleaned.strip("-")
+    # Cap length to 80 chars for cloud provider compatibility
+    return cleaned[:80]
+
+
+def derive_default_app_name(target: str, repo: Optional[str] = None) -> str:
+    """Extracts an idiomatic, clean application name from target URL, repo slug, or local directory path."""
+    # 1. If explicit repo slug provided (e.g. "owner/3w-test1")
+    if repo:
+        slug_part = repo.strip().split("/")[-1].replace(".git", "")
+        if slug_part and not slug_part.lower().startswith("tmp"):
+            return sanitize_app_name(slug_part)
+
+    # 2. If target is a GitHub URL or slug
+    if target:
+        t = target.strip().rstrip("/")
+        if "github.com" in t or ("/" in t and not Path(t).exists()):
+            slug_part = t.split("/")[-1].replace(".git", "")
+            if slug_part and not slug_part.lower().startswith("tmp"):
+                return sanitize_app_name(slug_part)
+
+        # 3. If target is a local path
+        try:
+            p = Path(t).resolve()
+            if p.name and not p.name.lower().startswith("tmp"):
+                return sanitize_app_name(p.name)
+        except Exception:
+            pass
+
+    return "app"

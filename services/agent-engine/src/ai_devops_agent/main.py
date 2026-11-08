@@ -90,6 +90,7 @@ class DeployRequest(BaseModel):
     env_vars: Dict[str, str] = Field(default_factory=dict, description="Key-value environment variables")
     vercel_token: Optional[str] = Field(default=None, description="Vercel Access Token")
     render_api_key: Optional[str] = Field(default=None, description="Render API Key")
+    app_name: Optional[str] = Field(default=None, description="Application / project name for cloud services")
     job_id: Optional[str] = Field(default=None, description="Job identifier")
     webhook_url: Optional[str] = Field(default=None, description="Webhook callback URL")
 
@@ -166,7 +167,7 @@ def deploy_endpoint(req: DeployRequest, background_tasks: BackgroundTasks):
     if not repo_path.exists() or not repo_path.is_dir():
         raise HTTPException(status_code=400, detail=f"Directory not found: {req.repo_path}")
 
-    analysis = analyze_repository(repo_path)
+    analysis = analyze_repository(repo_path, project_name=req.app_name)
     deployer = CloudDeployer(
         vercel_token=req.vercel_token,
         render_api_key=req.render_api_key,
@@ -195,6 +196,7 @@ def deploy_endpoint(req: DeployRequest, background_tasks: BackgroundTasks):
         env_values=req.env_vars,
         log_callback=log_collector,
         workspace_dir=repo_path,
+        app_name=req.app_name,
     )
 
     response_payload = {

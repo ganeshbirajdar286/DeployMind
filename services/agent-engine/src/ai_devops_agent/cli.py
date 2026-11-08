@@ -7,6 +7,7 @@ from ai_devops_agent.analyzer.detector import analyze_repository
 from ai_devops_agent.generator.engine import generate_devops_bundle
 from ai_devops_agent.agent.graph import run_devops_workflow
 from ai_devops_agent.agent.autonomous_loop import run_autonomous_pipeline
+from ai_devops_agent.utils.sanitizer import sanitize_app_name, derive_default_app_name
 from ai_devops_agent.utils.banner import print_banner, prompt_for_target
 from ai_devops_agent.utils.theme import (
     print_box,
@@ -22,6 +23,20 @@ from ai_devops_agent.utils.theme import (
     DIM,
     RESET,
 )
+
+
+def prompt_for_app_name(default_name: str) -> str:
+    """Prompts user for application name matching the user requirement: 'the name must ask after github token'."""
+    try:
+        prompt_text = f"\033[38;2;160;174;192mEnter Application Name (press Enter for '{default_name}'):\033[0m "
+        entered = input(prompt_text).strip()
+        if entered:
+            clean = sanitize_app_name(entered)
+            return clean or default_name
+        return default_name
+    except (KeyboardInterrupt, EOFError):
+        print(f"\nExiting.")
+        sys.exit(0)
 
 
 def main():
@@ -43,12 +58,17 @@ def main():
                 print()
                 return
 
+        # Prompt user for application name right after GitHub token!
+        default_app_name = derive_default_app_name(target)
+        app_name = prompt_for_app_name(default_app_name)
+
         run_autonomous_pipeline(
             target=target,
             github_token=token,
             branch_name="ai-devops-setup",
             max_iterations=3,
             repo=None,
+            app_name=app_name,
         )
         return
 
@@ -66,6 +86,7 @@ def main():
     auto_parser.add_argument("--repo", type=str, default=None, help="GitHub repository (owner/repo) if target is a local path")
     auto_parser.add_argument("--branch", type=str, default="ai-devops-setup", help="Dedicated branch name to push")
     auto_parser.add_argument("--token", type=str, default=None, help="GitHub Personal Access Token")
+    auto_parser.add_argument("--app-name", "--name", dest="app_name", type=str, default=None, help="Application / project name for cloud services")
     auto_parser.add_argument("--retries", type=int, default=3, help="Max self-healing iterations (default: 3)")
 
     # 2. Inspect command
@@ -97,6 +118,7 @@ def main():
     deploy_parser.add_argument("target", type=str, help="GitHub URL (https://github.com/owner/repo), slug, or local path")
     deploy_parser.add_argument("--repo", type=str, default=None, help="GitHub repository (owner/repo) if target is a local path")
     deploy_parser.add_argument("--branch", type=str, default="main", help="Dedicated branch name to deploy (default: main)")
+    deploy_parser.add_argument("--app-name", "--name", dest="app_name", type=str, default=None, help="Application / project name for cloud services")
     deploy_parser.add_argument("--vercel-token", type=str, default=None, help="Vercel Access Token (or set VERCEL_TOKEN env var)")
     deploy_parser.add_argument("--render-token", type=str, default=None, help="Render API Key (or set RENDER_API_KEY env var)")
     deploy_parser.add_argument("--token", type=str, default=None, help="GitHub Personal Access Token")
@@ -104,12 +126,27 @@ def main():
     args = parser.parse_args()
 
     if args.command == "auto":
+        token = args.token or os.getenv("GITHUB_TOKEN")
+        if "github.com" in args.target and not token and sys.stdin.isatty():
+            try:
+                entered_token = input("\033[38;2;160;174;192mEnter GitHub Token (optional, press Enter to skip):\033[0m ").strip()
+                token = entered_token or None
+            except (KeyboardInterrupt, EOFError):
+                print()
+                return
+
+        app_name = args.app_name
+        if not app_name and sys.stdin.isatty():
+            default_app_name = derive_default_app_name(args.target, repo=args.repo)
+            app_name = prompt_for_app_name(default_app_name)
+
         run_autonomous_pipeline(
             target=args.target,
-            github_token=args.token or os.getenv("GITHUB_TOKEN"),
+            github_token=token,
             branch_name=args.branch,
             max_iterations=args.retries,
             repo=args.repo,
+            app_name=app_name,
         )
         return
 
@@ -119,9 +156,22 @@ def main():
         from ai_devops_agent.deployer import CloudDeployer, interactive_cloud_deployment
 
         token = args.token or os.getenv("GITHUB_TOKEN")
+        if "github.com" in args.target and not token and sys.stdin.isatty():
+            try:
+                entered_token = input("\033[38;2;160;174;192mEnter GitHub Token (optional, press Enter to skip):\033[0m ").strip()
+                token = entered_token or None
+            except (KeyboardInterrupt, EOFError):
+                print()
+                return
+
+        app_name = args.app_name
+        if not app_name and sys.stdin.isatty():
+            default_app_name = derive_default_app_name(args.target, repo=args.repo)
+            app_name = prompt_for_app_name(default_app_name)
+
         target_path, detected_repo, temp_workspace = resolve_target_workspace(args.target, token=token, repo=args.repo)
         try:
-            analysis = analyze_repository(target_path)
+            analysis = analyze_repository(target_path, project_name=app_name)
             # If tokens provided via flags, inject into environment
             if args.vercel_token:
                 os.environ["VERCEL_TOKEN"] = args.vercel_token
@@ -133,6 +183,7 @@ def main():
                 detected_repo=detected_repo or args.target,
                 branch_name=args.branch,
                 local_env_dir=target_path,
+                app_name=app_name,
             )
         finally:
             if temp_workspace:

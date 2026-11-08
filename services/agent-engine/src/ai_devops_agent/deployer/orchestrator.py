@@ -7,6 +7,7 @@ from .models import DeploymentResult, MultiServiceDeploymentSummary
 from .render import RenderDeployer
 from .vercel import VercelDeployer
 from .url_adapter import adapt_backend_url_for_frontend
+from ai_devops_agent.utils.sanitizer import sanitize_app_name, derive_default_app_name
 from ai_devops_agent.utils.theme import (
     box,
     print_box,
@@ -84,11 +85,18 @@ class CloudDeployer:
         env_values: Optional[Dict[str, str]] = None,
         log_callback: Optional[Callable[[str], None]] = None,
         workspace_dir: Optional[Path] = None,
+        app_name: Optional[str] = None,
     ) -> MultiServiceDeploymentSummary:
         """Deploys all detected services with bidirectional dynamic URL synchronization."""
         def emit(msg: str):
             if log_callback:
                 log_callback(msg)
+
+        # Enforce user-provided or clean application name (never random tmp* folders)
+        if app_name:
+            analysis.repo_name = sanitize_app_name(app_name)
+        elif analysis.repo_name.lower().startswith("tmp"):
+            analysis.repo_name = derive_default_app_name(github_repo, repo=github_repo)
 
         deploy_lines = [
             f"{MUTED}Repository: {RESET} {BOLD}{WHITE}{github_repo}{RESET}",
@@ -155,10 +163,15 @@ class CloudDeployer:
             emit(f"[Step 1/3] Deploying Backend Service '{backend_service.name}' to Render...")
             emit(f"  -> Configured Backend environment variables ({len(backend_env)}): {', '.join(sorted(backend_env.keys()))}")
 
+            if backend_service.path == "." or backend_service.name == analysis.repo_name:
+                backend_deploy_name = analysis.repo_name
+            else:
+                backend_deploy_name = f"{analysis.repo_name}-{backend_service.name}"
+
             backend_res = self.render_deployer.deploy_web_service(
                 repo_url=repo_url,
                 branch=branch,
-                service_name=f"{analysis.repo_name}-{backend_service.name}",
+                service_name=backend_deploy_name,
                 root_dir=backend_service.path,
                 env_vars=backend_env,
                 port=backend_service.default_port,
@@ -218,10 +231,15 @@ class CloudDeployer:
 
             emit(f"  -> Configured Frontend environment variables ({len(frontend_env)}): {', '.join(sorted(frontend_env.keys()))}")
 
+            if frontend_service.path == "." or frontend_service.name == analysis.repo_name:
+                frontend_deploy_name = analysis.repo_name
+            else:
+                frontend_deploy_name = f"{analysis.repo_name}-{frontend_service.name}"
+
             frontend_res = self.vercel_deployer.deploy_project(
                 repo_slug=github_repo,
                 branch=branch,
-                service_name=f"{analysis.repo_name}-{frontend_service.name}",
+                service_name=frontend_deploy_name,
                 root_dir=frontend_service.path,
                 framework=frontend_service.framework.value,
                 env_vars=frontend_env,
@@ -325,11 +343,28 @@ def interactive_cloud_deployment(
     branch_name: str = "ai-devops-setup",
     local_env_dir: Optional[Path] = None,
     default_env_values: Optional[Dict[str, str]] = None,
+    app_name: Optional[str] = None,
 ) -> Optional[MultiServiceDeploymentSummary]:
     """Interactively prompts user for credentials and triggers Vercel + Render deployment with bidirectional URL linking."""
+    # Ensure application name is resolved cleanly (prevent random tmp* names)
+    if not app_name:
+        default_app_name = derive_default_app_name(detected_repo, repo=detected_repo)
+        if analysis.repo_name and not analysis.repo_name.lower().startswith("tmp"):
+            default_app_name = analysis.repo_name
+        try:
+            val = input(f"\033[38;2;160;174;192mEnter Application Name (press Enter for '{default_app_name}'):\033[0m ").strip()
+            app_name = sanitize_app_name(val) if val else default_app_name
+        except Exception:
+            app_name = default_app_name
+    else:
+        app_name = sanitize_app_name(app_name)
+
+    analysis.repo_name = app_name
+
     print("\n" + "=" * 60)
     print("☁️ Cloud Deployment Configuration")
     print("=" * 60)
+    print(f"Application Name: {app_name}")
     print("Deploy targets:")
     print("  * Frontend -> Vercel")
     print("  * Backend  -> Render")
@@ -412,4 +447,5 @@ def interactive_cloud_deployment(
         env_values=env_values,
         log_callback=print,
         workspace_dir=local_env_dir,
+        app_name=app_name,
     )

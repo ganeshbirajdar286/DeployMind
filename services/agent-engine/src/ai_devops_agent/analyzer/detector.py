@@ -13,9 +13,9 @@ from .python_detector import detect_python_service
 from .env_detector import detect_environment_variables
 
 
-def analyze_repository(repo_path: Path) -> ProjectAnalysis:
+def analyze_repository(repo_path: Path, project_name: Optional[str] = None) -> ProjectAnalysis:
     repo_path = repo_path.resolve()
-    repo_name = repo_path.name
+    repo_name = project_name or repo_path.name
     warnings: List[str] = []
     missing_info: List[str] = []
 

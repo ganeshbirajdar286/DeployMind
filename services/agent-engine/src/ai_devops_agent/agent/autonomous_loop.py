@@ -14,7 +14,12 @@ from ai_devops_agent.runner.secrets_manager import GitHubSecretsManager
 from ai_devops_agent.runner.git_pusher import GitPusher
 from ai_devops_agent.runner.github_runner import GitHubActionsRunner
 from ai_devops_agent.utils.diff_viewer import display_bundle_diffs
-from ai_devops_agent.utils.sanitizer import redact_secrets, sanitize_url_for_logging
+from ai_devops_agent.utils.sanitizer import (
+    redact_secrets,
+    sanitize_url_for_logging,
+    sanitize_app_name,
+    derive_default_app_name,
+)
 from ai_devops_agent.utils.theme import (
     print_powerline_header,
     print_step_box,
@@ -202,16 +207,32 @@ def run_autonomous_pipeline(
     branch_name: str = "ai-devops-setup",
     max_iterations: int = 3,
     repo: Optional[str] = None,
+    app_name: Optional[str] = None,
 ):
     """Coordinates the entire autonomous journey: GitHub URL -> Clone -> Analysis -> Secrets -> Diff -> Push -> Self-Healing."""
     token = github_token or os.getenv("GITHUB_TOKEN")
     target_path, detected_repo, temp_workspace = resolve_target_workspace(target, token=token, repo=repo)
 
+    # Resolve idiomatic application name (never use random temp dir names like tmpv85pzgsk)
+    if not app_name:
+        default_app_name = derive_default_app_name(target, repo=detected_repo or repo)
+        if sys.stdin.isatty():
+            try:
+                entered = input(f"\033[38;2;160;174;192mEnter Application Name (press Enter for '{default_app_name}'):\033[0m ").strip()
+                app_name = sanitize_app_name(entered) if entered else default_app_name
+            except (KeyboardInterrupt, EOFError):
+                app_name = default_app_name
+        else:
+            app_name = default_app_name
+    else:
+        app_name = sanitize_app_name(app_name)
+
     try:
-        print_powerline_header(detected_repo or target_path.name, branch_name, "Initializing")
+        print_powerline_header(app_name or detected_repo or target_path.name, branch_name, "Initializing")
         print_box(
             title="🚀 Autonomous Cloud DevOps Engine",
             lines=[
+                f"{MUTED}Application Name:  {RESET}  {BOLD}{WHITE}{app_name}{RESET}",
                 f"{MUTED}Target GitHub Repo:{RESET}  {BOLD}{WHITE}{detected_repo or 'Local Repository'}{RESET}",
                 f"{MUTED}Local Workspace:   {RESET}  {CYAN}{target_path}{RESET}",
                 f"{MUTED}Setup Branch:      {RESET}  {PINK}{branch_name}{RESET}",
@@ -220,8 +241,8 @@ def run_autonomous_pipeline(
             border_color=CYAN,
         )
 
-        # 1. Deterministic Analysis
-        analysis = analyze_repository(target_path)
+        # 1. Deterministic Analysis with application name override
+        analysis = analyze_repository(target_path, project_name=app_name)
         all_env_vars = []
         primary_port = 8080
         primary_health_path = "/"
@@ -487,6 +508,7 @@ def run_autonomous_pipeline(
                         branch_name=default_branch,
                         local_env_dir=target_path,
                         default_env_values=configured_secrets,
+                        app_name=app_name,
                     )
                 except Exception as e:
                     print(f"\n[Notice] Cloud deployment skipped: {e}\n")
