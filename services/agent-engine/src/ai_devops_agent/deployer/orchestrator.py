@@ -6,6 +6,7 @@ from ai_devops_agent.analyzer.models import ProjectAnalysis, ServiceMetadata, Fr
 from .models import DeploymentResult, MultiServiceDeploymentSummary
 from .render import RenderDeployer
 from .vercel import VercelDeployer
+from .url_adapter import adapt_backend_url_for_frontend
 from ai_devops_agent.utils.theme import (
     box,
     print_box,
@@ -82,6 +83,7 @@ class CloudDeployer:
         branch: str = "ai-devops-setup",
         env_values: Optional[Dict[str, str]] = None,
         log_callback: Optional[Callable[[str], None]] = None,
+        workspace_dir: Optional[Path] = None,
     ) -> MultiServiceDeploymentSummary:
         """Deploys all detected services with bidirectional dynamic URL synchronization."""
         def emit(msg: str):
@@ -118,6 +120,16 @@ class CloudDeployer:
         # If not cleanly split, fall back to first as backend or frontend
         if not frontend_service and not backend_service and analysis.services:
             backend_service = analysis.services[0]
+
+        # Resolve filesystem directories for AST analysis if workspace is provided
+        frontend_dir = None
+        backend_dir = None
+        if workspace_dir:
+            ws = Path(workspace_dir).resolve()
+            if frontend_service:
+                frontend_dir = ws if frontend_service.path == "." else ws / frontend_service.path
+            if backend_service:
+                backend_dir = ws if backend_service.path == "." else ws / backend_service.path
 
         backend_res: Optional[DeploymentResult] = None
         frontend_res: Optional[DeploymentResult] = None
@@ -183,18 +195,26 @@ class CloudDeployer:
             if backend_res and backend_res.live_url:
                 backend_url_keys_updated = []
                 backend_key_patterns = ("BACKEND", "BAKEND", "BASE_URL", "API_URL", "SERVER_URL", "API_ENDPOINT")
-                for k in list(frontend_env.keys()) + list(frontend_service.env_vars_detected):
-                    if any(pat in k.upper() for pat in backend_key_patterns):
-                        frontend_env[k] = backend_res.live_url
-                        backend_url_keys_updated.append(k)
+                candidate_keys = list(frontend_env.keys()) + list(frontend_service.env_vars_detected or [])
+                matching_keys = [k for k in sorted(set(candidate_keys)) if any(pat in k.upper() for pat in backend_key_patterns)]
 
-                if not backend_url_keys_updated:
-                    frontend_env["VITE_BACKEND_URL"] = backend_res.live_url
-                    frontend_env["VITE_BASE_URL"] = backend_res.live_url
-                    frontend_env["NEXT_PUBLIC_API_URL"] = backend_res.live_url
-                    backend_url_keys_updated.extend(["VITE_BACKEND_URL", "VITE_BASE_URL"])
+                if not matching_keys:
+                    matching_keys = ["VITE_BACKEND_URL", "VITE_BASE_URL"]
 
-                emit(f"  -> Injected Live Backend URL ({backend_res.live_url}) into Frontend: {', '.join(sorted(set(backend_url_keys_updated)))}")
+                for k in matching_keys:
+                    orig_val = env_values.get(k) or frontend_env.get(k)
+                    adapted_url = adapt_backend_url_for_frontend(
+                        live_backend_url=backend_res.live_url,
+                        original_env_value=orig_val,
+                        frontend_dir=frontend_dir,
+                        env_key=k,
+                        backend_dir=backend_dir,
+                        log_callback=emit,
+                    )
+                    frontend_env[k] = adapted_url
+                    backend_url_keys_updated.append(k)
+
+                emit(f"  -> Injected Live Backend URL into Frontend {', '.join(sorted(set(backend_url_keys_updated)))}: {frontend_env[matching_keys[0]]}")
 
             emit(f"  -> Configured Frontend environment variables ({len(frontend_env)}): {', '.join(sorted(frontend_env.keys()))}")
 
@@ -391,4 +411,5 @@ def interactive_cloud_deployment(
         branch=branch_name,
         env_values=env_values,
         log_callback=print,
+        workspace_dir=local_env_dir,
     )

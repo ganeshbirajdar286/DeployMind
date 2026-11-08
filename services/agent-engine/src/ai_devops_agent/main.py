@@ -194,6 +194,7 @@ def deploy_endpoint(req: DeployRequest, background_tasks: BackgroundTasks):
         branch=req.branch,
         env_values=req.env_vars,
         log_callback=log_collector,
+        workspace_dir=repo_path,
     )
 
     response_payload = {
