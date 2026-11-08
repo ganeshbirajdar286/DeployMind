@@ -11,11 +11,17 @@ Autonomous Cloud & Local DevOps Automation Platform with deterministic repositor
 Any user can install and run the application globally without cloning this repository:
 
 ```bash
-# Using uv tool (isolated global CLI command):
-uv tool install --force https://github.com/ganeshbirajdar286/DeployMind/releases/download/v0.1.1/ai_devops_agent-0.1.1-py3-none-any.whl
+# Option 1: Direct from GitHub main branch (Always latest release & features):
+uv tool install --force "git+https://github.com/ganeshbirajdar286/DeployMind.git#subdirectory=services/agent-engine"
 
-# Or using standard pip:
-pip install https://github.com/ganeshbirajdar286/DeployMind/releases/download/v0.1.1/ai_devops_agent-0.1.1-py3-none-any.whl
+# Or using standard pip from Git:
+pip install --upgrade "git+https://github.com/ganeshbirajdar286/DeployMind.git#subdirectory=services/agent-engine"
+
+# Option 2: Pre-built Release Wheel (v0.1.2)
+uv tool install --force https://github.com/ganeshbirajdar286/DeployMind/releases/download/v0.1.2/ai_devops_agent-0.1.2-py3-none-any.whl
+
+# Or using pip with wheel:
+pip install https://github.com/ganeshbirajdar286/DeployMind/releases/download/v0.1.2/ai_devops_agent-0.1.2-py3-none-any.whl
 ```
 
 ### 1. Install for Local Development
@@ -38,8 +44,8 @@ To produce standalone `.whl` and `.tar.gz` packages:
 uv build
 ```
 Built artifacts are stored in `dist/`:
-- `dist/ai_devops_agent-0.1.0-py3-none-any.whl` (Wheel)
-- `dist/ai_devops_agent-0.1.0.tar.gz` (Source Distribution)
+- `dist/ai_devops_agent-0.1.2-py3-none-any.whl` (Wheel)
+- `dist/ai_devops_agent-0.1.2.tar.gz` (Source Distribution)
 
 ---
 

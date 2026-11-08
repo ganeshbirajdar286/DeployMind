@@ -3,7 +3,7 @@ AI DevOps Agent Platform (ai-devops-agent)
 Autonomous Cloud & Local DevOps Automation Engine
 """
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 from ai_devops_agent.analyzer.detector import analyze_repository
 from ai_devops_agent.generator.engine import generate_devops_bundle
