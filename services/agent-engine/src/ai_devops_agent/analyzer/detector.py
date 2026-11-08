@@ -27,19 +27,43 @@ def analyze_repository(repo_path: Path, project_name: Optional[str] = None) -> P
 
     detected_services: List[ServiceMetadata] = []
 
-    # Check immediate subdirectories first for multi-service/monorepo setups
-    try:
-        for child in sorted(repo_path.iterdir()):
-            if not child.is_dir() or child.name.startswith(".") or child.name.lower() in ignored_subdirs:
-                continue
+    # If the repository root is a Django project (has manage.py), it is a monolithic Django application.
+    # Detect the root directly so internal Django apps (e.g. accounts, listings) are not treated as separate microservices.
+    if (repo_path / "manage.py").exists():
+        root_service = detect_python_service(repo_path, service_name=repo_name)
+        if root_service:
+            root_service.path = "."
+            root_service.env_vars_detected = detect_environment_variables(repo_path)
+            detected_services.append(root_service)
 
-            svc = detect_node_service(child, service_name=child.name) or detect_python_service(child, service_name=child.name)
-            if svc:
-                svc.path = child.name
-                svc.env_vars_detected = detect_environment_variables(child)
-                detected_services.append(svc)
-    except Exception:
-        pass
+            # Check if there is also an isolated frontend client service (e.g. client/frontend with package.json)
+            try:
+                for child in sorted(repo_path.iterdir()):
+                    if not child.is_dir() or child.name.startswith(".") or child.name.lower() in ignored_subdirs:
+                        continue
+                    if (child / "package.json").exists():
+                        frontend_svc = detect_node_service(child, service_name=child.name)
+                        if frontend_svc:
+                            frontend_svc.path = child.name
+                            frontend_svc.env_vars_detected = detect_environment_variables(child)
+                            detected_services.append(frontend_svc)
+            except Exception:
+                pass
+
+    # Check immediate subdirectories for multi-service/monorepo setups if not already resolved as a root Django project
+    if not detected_services:
+        try:
+            for child in sorted(repo_path.iterdir()):
+                if not child.is_dir() or child.name.startswith(".") or child.name.lower() in ignored_subdirs:
+                    continue
+
+                svc = detect_node_service(child, service_name=child.name) or detect_python_service(child, service_name=child.name)
+                if svc:
+                    svc.path = child.name
+                    svc.env_vars_detected = detect_environment_variables(child)
+                    detected_services.append(svc)
+        except Exception:
+            pass
 
     is_monorepo = len(detected_services) > 1
 

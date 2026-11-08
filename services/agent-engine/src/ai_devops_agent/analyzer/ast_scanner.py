@@ -99,8 +99,26 @@ def scan_python_imports(directory: Path) -> Tuple[Set[str], Set[str]]:
         except Exception:
             continue
 
-    # Filter out standard library modules
-    third_party_imports = {pkg for pkg in imported_modules if pkg not in STD_LIB_MODULES}
+    # Identify local project directories and files to exclude from third-party PyPI packages
+    local_modules: Set[str] = set()
+    search_dirs = [directory]
+    if directory.parent and directory.parent.exists() and directory.parent != directory:
+        search_dirs.append(directory.parent)
+    for s_dir in search_dirs:
+        try:
+            for item in s_dir.iterdir():
+                if item.is_dir() and not item.name.startswith((".", "_")):
+                    local_modules.add(item.name.lower())
+                elif item.is_file() and item.suffix == ".py":
+                    local_modules.add(item.stem.lower())
+        except Exception:
+            pass
+
+    # Filter out standard library modules and local project packages
+    third_party_imports = {
+        pkg for pkg in imported_modules
+        if pkg not in STD_LIB_MODULES and pkg.lower() not in local_modules
+    }
 
     # Map to PyPI packages and system requirements
     pypi_packages: Set[str] = set()
@@ -113,5 +131,19 @@ def scan_python_imports(directory: Path) -> Tuple[Set[str], Set[str]]:
             system_deps.update(PACKAGE_TO_SYSTEM_DEPS[mod])
         if pypi_name in PACKAGE_TO_SYSTEM_DEPS:
             system_deps.update(PACKAGE_TO_SYSTEM_DEPS[pypi_name])
+
+    # Check for frameworks or features in content that imply extra requirements
+    for py_file in directory.rglob("*.py"):
+        if any(ignored in str(py_file) for ignored in [".venv", "venv", "__pycache__", "site-packages", "node_modules"]):
+            continue
+        try:
+            content = py_file.read_text(encoding="utf-8", errors="ignore")
+            if "ImageField" in content and "pillow" not in pypi_packages:
+                pypi_packages.add("pillow")
+            if ("django.db.backends.postgresql" in content or "psycopg2" in content) and "psycopg2-binary" not in pypi_packages:
+                pypi_packages.add("psycopg2-binary")
+                system_deps.add("libpq-dev")
+        except Exception:
+            continue
 
     return pypi_packages, system_deps

@@ -7,7 +7,7 @@ services:
     container_name: {{ repo_name }}-{{ service.name }}
     restart: unless-stopped
     ports:
-      - "{{ service.default_port }}:{{ service.default_port }}"
+      - "{{ service.host_port | default(service.default_port) }}:{{ service.default_port }}"
     environment:
       - PORT={{ service.default_port }}
 {% if service.env_vars_detected %}

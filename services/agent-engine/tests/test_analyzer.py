@@ -108,3 +108,42 @@ def test_detect_client_backend_monorepo(tmp_path):
     assert "JWT_SECRET" in backend_svc.env_vars_detected
     assert analysis.suggested_deployment_targets["client"] == "vercel"
     assert analysis.suggested_deployment_targets["backend"] == "render"
+
+
+def test_detect_django_monolith_with_internal_apps(tmp_path):
+    # Setup root manage.py
+    (tmp_path / "manage.py").write_text("#!/usr/bin/env python\nimport os\n", encoding="utf-8")
+
+    # Setup inner project folder with wsgi.py and settings.py
+    inner_dir = tmp_path / "myproject"
+    inner_dir.mkdir()
+    (inner_dir / "wsgi.py").write_text("application = None\n", encoding="utf-8")
+    (inner_dir / "settings.py").write_text("DATABASES = {'default': {'ENGINE': 'django.db.backends.postgresql'}}\n", encoding="utf-8")
+
+    # Setup Django apps as subdirectories with apps.py and models.py
+    for app_name in ["accounts", "listings", "contacts"]:
+        app_dir = tmp_path / app_name
+        app_dir.mkdir()
+        (app_dir / "apps.py").write_text(f"class {app_name.capitalize()}Config:\n    pass\n", encoding="utf-8")
+        (app_dir / "models.py").write_text(
+            f"from django.db import models\nimport contacts\nphoto = models.ImageField()\n",
+            encoding="utf-8"
+        )
+
+    analysis = analyze_repository(tmp_path)
+
+    assert analysis.is_monorepo is False
+    assert len(analysis.services) == 1
+
+    svc = analysis.services[0]
+    assert svc.framework == FrameworkType.DJANGO
+    assert svc.path == "."
+    assert "gunicorn myproject.wsgi:application" in svc.start_command
+    # Internal apps must NOT be treated as third-party PyPI packages
+    assert "accounts" not in svc.extra_pypi_packages
+    assert "contacts" not in svc.extra_pypi_packages
+    assert "listings" not in svc.extra_pypi_packages
+    # Pillow must be detected from ImageField
+    assert "pillow" in svc.extra_pypi_packages
+    # PostgreSQL driver must be detected
+    assert "psycopg2-binary" in svc.extra_pypi_packages

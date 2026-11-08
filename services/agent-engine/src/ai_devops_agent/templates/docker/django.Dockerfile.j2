@@ -1,0 +1,69 @@
+# ==========================================
+# Stage 1: Build & Install Dependencies
+# ==========================================
+FROM python:{{ runtime_version | default('3.11') }}-slim AS builder
+
+WORKDIR /app
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential libpq-dev {% if system_packages %}{% for pkg in system_packages if pkg != 'libpq-dev' %}{{ pkg }} {% endfor %}{% endif %} \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create virtual environment
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+{% if package_manager == 'poetry' %}
+RUN pip install poetry
+COPY pyproject.toml poetry.lock* ./
+RUN poetry config virtualenvs.create false && poetry install --no-root --no-interaction --no-ansi
+{% elif package_manager == 'uv' %}
+RUN pip install uv
+COPY pyproject.toml uv.lock* ./
+RUN uv pip install -r pyproject.toml
+{% else %}
+COPY requirements.txt* ./
+RUN if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+{% endif %}
+
+# Ensure production WSGI server, static file handler, and detected packages are installed
+RUN pip install --no-cache-dir gunicorn whitenoise {% if extra_pypi_packages %}{% for pkg in extra_pypi_packages if pkg not in ['gunicorn', 'whitenoise'] %}{{ pkg }} {% endfor %}{% endif %}
+
+# ==========================================
+# Stage 2: Minimal Production Runner
+# ==========================================
+FROM python:{{ runtime_version | default('3.11') }}-slim AS runner
+
+WORKDIR /app
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PATH="/opt/venv/bin:$PATH" \
+    PORT={{ default_port | default(8000) }}
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq5 {% if system_packages %}{{ system_packages | join(' ') }}{% endif %} \
+    && rm -rf /var/lib/apt/lists/*
+
+# Security: Create and use non-root application user
+RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+
+# Copy virtualenv from builder stage
+COPY --from=builder --chown=appuser:appuser /opt/venv /opt/venv
+
+# Copy application source code
+COPY --chown=appuser:appuser . .
+
+USER appuser
+
+EXPOSE {{ default_port | default(8000) }}
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:{{ default_port | default(8000) }}{{ health_check_path | default('/') }}')" || exit 1
+
+CMD [{{ start_command_args | default('"gunicorn", "btre.wsgi:application", "--bind", "0.0.0.0:8000"') }}]

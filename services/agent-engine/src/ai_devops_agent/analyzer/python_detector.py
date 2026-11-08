@@ -7,16 +7,26 @@ from .ast_scanner import scan_python_imports
 
 
 def detect_python_service(directory: Path, service_name: str = "api") -> Optional[ServiceMetadata]:
+    # Check if this directory is an internal Django app or inner config within a parent Django project
+    if directory.parent and (directory.parent / "manage.py").exists():
+        if (directory / "apps.py").exists() or (directory / "wsgi.py").exists():
+            return None
+
     has_pyproject = (directory / "pyproject.toml").exists()
     has_requirements = (directory / "requirements.txt").exists()
     has_pipfile = (directory / "Pipfile").exists()
     has_setup = (directory / "setup.py").exists()
 
-    if not (has_pyproject or has_requirements or has_pipfile or has_setup):
-        # Also check if there's any .py file directly in directory
-        py_files = list(directory.glob("*.py"))
-        if not py_files:
-            return None
+    # Entry point discovery
+    entry_file = None
+    for candidate in ["main.py", "app.py", "server.py", "api.py", "manage.py"]:
+        if (directory / candidate).exists():
+            entry_file = candidate
+            break
+
+    if not (has_pyproject or has_requirements or has_pipfile or has_setup or entry_file):
+        # A subfolder without a manifest or a known entry file is just an internal package/module, not a runnable service
+        return None
 
     # Read all dependency texts
     dep_text = ""
@@ -86,13 +96,18 @@ def detect_python_service(directory: Path, service_name: str = "api") -> Optiona
         framework = FrameworkType.DJANGO
         default_port = 8000
         health_check_path = "/"
-        # Look for wsgi.py
-        wsgi_files = list(directory.glob("*/wsgi.py"))
+        # Look for wsgi.py in immediate subdirectories or deeper
+        wsgi_files = list(directory.glob("*/wsgi.py")) or [f for f in directory.glob("**/wsgi.py") if ".venv" not in str(f) and "venv" not in str(f)]
         if wsgi_files:
             app_dir = wsgi_files[0].parent.name
             start_cmd = f"gunicorn {app_dir}.wsgi:application --bind 0.0.0.0:8000"
         else:
-            start_cmd = "python manage.py runserver 0.0.0.0:8000"
+            start_cmd = "gunicorn wsgi:application --bind 0.0.0.0:8000"
+
+        # Production Django requires gunicorn, whitenoise, and django
+        for prod_pkg in ["django", "gunicorn", "whitenoise"]:
+            if prod_pkg not in dep_words and prod_pkg not in unlisted_pypi:
+                unlisted_pypi.append(prod_pkg)
     else:
         if entry_file:
             start_cmd = f"python {entry_file}"

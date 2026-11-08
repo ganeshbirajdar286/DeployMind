@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Dict, List, Optional
 from jinja2 import Environment, FileSystemLoader
-from ai_devops_agent.analyzer.models import ProjectAnalysis, FrameworkType, ServiceMetadata, Language
+from ai_devops_agent.analyzer.models import (
+    ProjectAnalysis,
+    FrameworkType,
+    ServiceMetadata,
+    Language,
+    PackageManager,
+)
 
 try:
     from importlib.resources import files
@@ -54,7 +61,9 @@ def generate_devops_bundle(
             dockerfile_template_name = "docker/express.Dockerfile.j2"
         elif service.framework == FrameworkType.FASTAPI:
             dockerfile_template_name = "docker/fastapi.Dockerfile.j2"
-        elif service.framework in {FrameworkType.FLASK, FrameworkType.DJANGO, FrameworkType.PYTHON_GENERIC}:
+        elif service.framework == FrameworkType.DJANGO:
+            dockerfile_template_name = "docker/django.Dockerfile.j2"
+        elif service.framework in {FrameworkType.FLASK, FrameworkType.PYTHON_GENERIC}:
             dockerfile_template_name = "docker/fastapi.Dockerfile.j2"
 
         if dockerfile_template_name:
@@ -77,17 +86,60 @@ def generate_devops_bundle(
             dockerignore_template = env.get_template("docker/.dockerignore.j2")
             artifacts[f"{prefix}.dockerignore"] = dockerignore_template.render()
 
+            # Auto-generate requirements.txt if python service lacks a dependency manifest
+            if service.language == Language.PYTHON and service.package_manager == PackageManager.PIP:
+                if not service.details.get("has_requirements", True) and not service.details.get("has_pyproject", False):
+                    req_path = f"{prefix}requirements.txt"
+                    if req_path not in artifacts:
+                        pkgs: List[str] = []
+                        seen_names = set()
+
+                        def add_pkg(spec: str):
+                            raw_name = re.split(r"[><=~]", spec)[0].strip().lower().replace("-", "_")
+                            if raw_name not in seen_names:
+                                seen_names.add(raw_name)
+                                pkgs.append(spec)
+
+                        if service.framework == FrameworkType.DJANGO:
+                            add_pkg("Django>=4.2,<5.0")
+                            add_pkg("gunicorn>=21.2.0")
+                            add_pkg("whitenoise>=6.6.0")
+                        elif service.framework == FrameworkType.FASTAPI:
+                            add_pkg("fastapi>=0.100.0")
+                            add_pkg("uvicorn[standard]>=0.22.0")
+                        elif service.framework == FrameworkType.FLASK:
+                            add_pkg("Flask>=3.0.0")
+                            add_pkg("gunicorn>=21.2.0")
+
+                        for p in service.extra_pypi_packages:
+                            add_pkg(p)
+
+                        if pkgs:
+                            artifacts[req_path] = "\n".join(pkgs) + "\n"
+
             if service.env_vars_detected:
                 env_content = "# Generated environment variables template\n"
                 for var in service.env_vars_detected:
                     env_content += f"{var}=\n"
                 artifacts[f"{prefix}.env.example"] = env_content
 
-    # 2. Generate Root Docker Compose
+    # 2. Generate Root Docker Compose with unique host ports
+    allocated_host_ports = set()
+    compose_services = []
+    for s in analysis.services:
+        s_dict = s.model_dump()
+        target_port = s.default_port
+        host_port = target_port
+        while host_port in allocated_host_ports:
+            host_port += 1
+        allocated_host_ports.add(host_port)
+        s_dict["host_port"] = host_port
+        compose_services.append(s_dict)
+
     compose_template = env.get_template("compose/docker-compose.yml.j2")
     artifacts["docker-compose.yml"] = compose_template.render(
         repo_name=analysis.repo_name,
-        services=[s.model_dump() for s in analysis.services],
+        services=compose_services,
     )
 
     # Detect language support across services
