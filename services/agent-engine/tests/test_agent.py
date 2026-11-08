@@ -143,3 +143,244 @@ CMD ["node", "index.js"]
     assert patch.failure_category == "MONOREPO_PATH_ALIAS"
     assert "ln -s /app /backend" in patch.updated_dockerfile
     assert patch.updated_dockerfile.index("ln -s /app /backend") < patch.updated_dockerfile.index("USER node")
+
+
+def test_interactive_find_target_file():
+    from ai_devops_agent.agent.autonomous_loop import find_target_file
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+        settings_file = tmp_path / "btre" / "settings.py"
+        settings_file.parent.mkdir(parents=True, exist_ok=True)
+        settings_file.write_text("DEBUG = True\nALLOWED_HOSTS = []\n")
+
+        df = tmp_path / "Dockerfile"
+        df.write_text("FROM python:3.11\nEXPOSE 8000\n")
+
+        reqs = tmp_path / "requirements.txt"
+        reqs.write_text("django>=4.2\n")
+
+        # Explicit name
+        f1 = find_target_file(tmp_path, "Please update settings.py to allow all hosts")
+        assert f1 is not None
+        assert f1.name == "settings.py"
+
+        # Semantic keywords
+        f2 = find_target_file(tmp_path, "change the database and allowed_hosts fallback")
+        assert f2 is not None
+        assert f2.name == "settings.py"
+
+        f3 = find_target_file(tmp_path, "change port to 8080 in container Dockerfile")
+        assert f3 is not None
+        assert f3.name == "Dockerfile"
+
+        f4 = find_target_file(tmp_path, "add pillow and psycopg2 to dependencies")
+        assert f4 is not None
+        assert f4.name == "requirements.txt"
+
+
+def test_interactive_apply_ai_instruction():
+    from ai_devops_agent.agent.autonomous_loop import apply_ai_instruction_to_file
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+
+        # 1. Test settings.py modification
+        settings_file = tmp_path / "settings.py"
+        settings_file.write_text(
+            "DEBUG = True\n"
+            "ALLOWED_HOSTS = []\n"
+            "DATABASES = {\n"
+            "    'default': {\n"
+            "        'ENGINE': 'django.db.backends.postgresql',\n"
+            "        'NAME': 'testdb',\n"
+            "    }\n"
+            "}\n"
+        )
+        ok, explanation, new_content = apply_ai_instruction_to_file(
+            settings_file,
+            "Update settings.py to allow all hosts and fallback to sqlite3 if postgres fails"
+        )
+        assert ok is True
+        assert "ALLOWED_HOSTS" in new_content
+        assert "sqlite3" in new_content
+        assert "DB_HOST" in new_content
+
+        # 2. Test requirements.txt modification
+        req_file = tmp_path / "requirements.txt"
+        req_file.write_text("Django>=4.2.0\n")
+        ok, explanation, new_reqs = apply_ai_instruction_to_file(
+            req_file,
+            "Add pillow and psycopg2 to requirements"
+        )
+        assert ok is True
+        assert "Pillow" in new_reqs
+        assert "psycopg2-binary" in new_reqs
+
+        # 3. Test Dockerfile modification
+        df_file = tmp_path / "Dockerfile"
+        df_file.write_text("FROM python:3.11\nEXPOSE 5000\nENV PORT=5000\n")
+        ok, explanation, new_df = apply_ai_instruction_to_file(
+            df_file,
+            "Change expose port to 8000"
+        )
+        assert ok is True
+        assert "EXPOSE 8000" in new_df
+        assert "ENV PORT=8000" in new_df
+
+
+def test_classify_user_intent():
+    from ai_devops_agent.agent.autonomous_loop import classify_user_intent
+
+    # 1. Questions and diagnostic queries
+    assert classify_user_intent("what is issue") == "QUESTION_OR_DIAGNOSIS"
+    assert classify_user_intent("why did it fail?") == "QUESTION_OR_DIAGNOSIS"
+    assert classify_user_intent("explain the error") == "QUESTION_OR_DIAGNOSIS"
+    assert classify_user_intent("how to fix this") == "QUESTION_OR_DIAGNOSIS"
+    assert classify_user_intent("what failed") == "QUESTION_OR_DIAGNOSIS"
+    assert classify_user_intent("what's wrong") == "QUESTION_OR_DIAGNOSIS"
+
+    # 2. Shortcuts
+    assert classify_user_intent("q") == "QUIT"
+    assert classify_user_intent("exit") == "QUIT"
+    assert classify_user_intent("r") == "RERUN"
+    assert classify_user_intent("rerun") == "RERUN"
+    assert classify_user_intent("l") == "LOGS"
+    assert classify_user_intent("s") == "STATUS"
+    assert classify_user_intent("p") == "PUSH"
+    assert classify_user_intent("d") == "DEPLOY"
+    assert classify_user_intent("e") == "ALIGN_CODEBASE"
+    assert classify_user_intent("align") == "ALIGN_CODEBASE"
+    assert classify_user_intent("fix") == "ALIGN_CODEBASE"
+    assert classify_user_intent("open settings.py") == "EDIT_SPECIFIC_FILE"
+    assert classify_user_intent("help") == "HELP"
+
+    # 3. Pending fix confirmation
+    assert classify_user_intent("yes", has_pending_fix=True) == "APPLY_PENDING_FIX"
+    assert classify_user_intent("y", has_pending_fix=True) == "APPLY_PENDING_FIX"
+    assert classify_user_intent("do it", has_pending_fix=True) == "APPLY_PENDING_FIX"
+    assert classify_user_intent("no", has_pending_fix=True) == "DISCARD_PENDING_FIX"
+
+    # 4. File modification instructions
+    assert classify_user_intent("Update settings.py to allow all hosts") == "MODIFY_FILE"
+    assert classify_user_intent("Change port to 8000 in Dockerfile") == "MODIFY_FILE"
+    assert classify_user_intent("Add pillow to requirements.txt") == "MODIFY_FILE"
+
+
+def test_align_project_codebase():
+    from ai_devops_agent.agent.autonomous_loop import align_project_codebase
+    from ai_devops_agent.analyzer.models import ProjectAnalysis, ServiceMetadata, FrameworkType, Language, PackageManager
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+
+        # 1. Django settings.py with hardcoded localhost and empty ALLOWED_HOSTS
+        settings_file = tmp_path / "btre" / "settings.py"
+        settings_file.parent.mkdir(parents=True, exist_ok=True)
+        settings_file.write_text(
+            "DEBUG = True\n"
+            "ALLOWED_HOSTS = []\n"
+            "DATABASES = {\n"
+            "    'default': {\n"
+            "        'ENGINE': 'django.db.backends.postgresql',\n"
+            "        'NAME': 'btredb',\n"
+            "        'USER': 'postgres',\n"
+            "        'PASSWORD': '123',\n"
+            "        'HOST': 'localhost',\n"
+            "    }\n"
+            "}\n"
+        )
+
+        # 2. docker-compose.yml without postgres
+        compose_file = tmp_path / "docker-compose.yml"
+        compose_file.write_text("version: '3.8'\nservices:\n  web:\n    build: .\n    ports:\n      - '8000:8000'\n")
+
+        # 3. Dockerfile
+        df_file = tmp_path / "Dockerfile"
+        df_file.write_text("FROM python:3.11\nWORKDIR /app\nCMD [\"gunicorn\", \"btre.wsgi:application\"]\n")
+
+        # 4. requirements.txt missing psycopg2
+        reqs_file = tmp_path / "requirements.txt"
+        reqs_file.write_text("django>=4.2.0\n")
+
+        analysis = ProjectAnalysis(
+            repo_name="test-repo",
+            services=[
+                ServiceMetadata(
+                    name="web",
+                    path=".",
+                    language=Language.PYTHON,
+                    framework=FrameworkType.DJANGO,
+                    package_manager=PackageManager.PIP,
+                    default_port=8000,
+                )
+            ]
+        )
+
+        res = align_project_codebase(
+            target_path=tmp_path,
+            analysis=analysis,
+            error_context="psycopg2.OperationalError: connection to server at 'localhost', port 5432 failed: Connection refused",
+        )
+
+        # Assert all files were detected and aligned across the project
+        assert len(res.file_changes) >= 3
+        assert any("settings.py" in k for k in res.file_changes)
+        assert "docker-compose.yml" in res.file_changes
+        assert "Dockerfile" in res.file_changes
+
+        # Verify settings.py alignment
+        aligned_settings = res.file_changes["btre/settings.py" if "btre/settings.py" in res.file_changes else "settings.py"]
+        assert "ALLOWED_HOSTS" in aligned_settings
+        assert "sqlite3" in aligned_settings
+        assert "DB_HOST" in aligned_settings
+
+        # Verify docker-compose alignment
+        aligned_compose = res.file_changes["docker-compose.yml"]
+        assert "image: postgres" in aligned_compose
+
+        # Verify Dockerfile alignment
+        aligned_df = res.file_changes["Dockerfile"]
+        assert "migrate" in aligned_df
+
+
+def test_handle_conversational_query_deterministic_diagnosis():
+    from ai_devops_agent.agent.autonomous_loop import handle_conversational_query
+    from ai_devops_agent.analyzer.models import ProjectAnalysis, ServiceMetadata, FrameworkType, Language, PackageManager
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+        settings_file = tmp_path / "settings.py"
+        settings_file.write_text("DEBUG = True\nALLOWED_HOSTS = []\nDATABASES = {}\n")
+
+        analysis = ProjectAnalysis(
+            repo_name="test-repo",
+            services=[
+                ServiceMetadata(
+                    name="web",
+                    path=".",
+                    language=Language.PYTHON,
+                    framework=FrameworkType.DJANGO,
+                    package_manager=PackageManager.PIP,
+                    default_port=8000,
+                )
+            ]
+        )
+
+        sample_err_log = (
+            "Attempt 2: Probing http://localhost:8000/ -> HTTP 500\n"
+            "psycopg2.OperationalError: connection to server at 'localhost', port 5432 failed: Connection refused"
+        )
+
+        proposed = handle_conversational_query(
+            user_query="what is issue",
+            target_path=tmp_path,
+            analysis=analysis,
+            detected_repo="owner/test-repo",
+            branch_name="ai-devops-setup",
+            last_error_logs=sample_err_log,
+        )
+
+        assert proposed is not None
+        assert proposed["file_path"] == settings_file
+        assert "SQLite fallback" in proposed["instruction"]

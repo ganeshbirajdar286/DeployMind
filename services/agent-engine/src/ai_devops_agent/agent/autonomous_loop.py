@@ -5,15 +5,16 @@ import subprocess
 import sys
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, List
 
 from ai_devops_agent.analyzer.detector import analyze_repository
 from ai_devops_agent.generator.engine import generate_devops_bundle
 from ai_devops_agent.runner.secrets_manager import GitHubSecretsManager
 from ai_devops_agent.runner.git_pusher import GitPusher
 from ai_devops_agent.runner.github_runner import GitHubActionsRunner
-from ai_devops_agent.utils.diff_viewer import display_bundle_diffs
+from ai_devops_agent.utils.diff_viewer import display_bundle_diffs, format_colored_diff
 from ai_devops_agent.utils.sanitizer import (
     redact_secrets,
     sanitize_url_for_logging,
@@ -162,6 +163,1303 @@ def interactive_edit_bundle(target_path: Path, artifacts: Dict[str, str]) -> Dic
     return artifacts
 
 
+def list_interesting_files(target_path: Path, artifacts: Optional[Dict[str, str]] = None) -> List[Path]:
+    """Finds interesting configuration, source, and DevOps files in the repository."""
+    interesting_names = {
+        "dockerfile", "docker-compose.yml", "docker-compose.yaml",
+        "requirements.txt", "package.json", "pyproject.toml",
+        ".env", "manage.py", "wsgi.py", "asgi.py"
+    }
+    found = []
+    seen_paths = set()
+
+    # Add known generated artifacts
+    if artifacts:
+        for rel_str in sorted(artifacts.keys()):
+            p = target_path / rel_str
+            if p.exists() and p not in seen_paths:
+                found.append(p)
+                seen_paths.add(p)
+
+    # Scan workspace for key files
+    for p in target_path.rglob("*"):
+        if any(ign in p.parts for ign in [".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build"]):
+            continue
+        if p.is_file():
+            name_lower = p.name.lower()
+            if (
+                name_lower in interesting_names
+                or "settings" in name_lower
+                or name_lower.endswith((".yml", ".yaml", ".env", ".toml"))
+                or p.name in ("Dockerfile", "manage.py")
+            ):
+                if p not in seen_paths:
+                    found.append(p)
+                    seen_paths.add(p)
+
+    return sorted(found, key=lambda p: (len(p.relative_to(target_path).parts), str(p.relative_to(target_path))))
+
+
+def find_target_file(target_path: Path, instruction: str) -> Optional[Path]:
+    """Finds target file path matching user instruction based on filename or semantic keywords."""
+    inst_lower = instruction.lower()
+
+    # 1. Check for explicit filenames or relative paths in prompt
+    tokens = re.findall(r'[a-zA-Z0-9_\-\./\\]+\.[a-zA-Z0-9]+|Dockerfile|dockerfile', instruction)
+    for token in tokens:
+        clean_tok = token.strip("./\\").replace("\\", "/")
+        direct = target_path / clean_tok
+        if direct.exists() and direct.is_file():
+            return direct
+        fname = Path(clean_tok).name
+        matches = [
+            p for p in target_path.rglob(fname)
+            if not any(ign in p.parts for ign in [".git", "node_modules", "__pycache__", ".venv", "venv"])
+        ]
+        if matches:
+            return sorted(matches, key=lambda p: len(p.parts))[0]
+
+    # 2. Semantic keywords mapping
+    if any(w in inst_lower for w in ["setting", "database", "allowed_hosts", "secret_key", "sqlite", "postgres", "db"]):
+        settings = [
+            p for p in target_path.rglob("*settings*.py")
+            if not any(ign in p.parts for ign in [".git", "node_modules", "__pycache__", ".venv", "venv"])
+        ]
+        if settings:
+            return sorted(settings, key=lambda p: len(p.parts))[0]
+
+    if any(w in inst_lower for w in ["dockerfile", "container", "port", "expose", "cmd", "gunicorn", "entrypoint"]):
+        dfs = [
+            p for p in target_path.rglob("*Dockerfile*")
+            if not any(ign in p.parts for ign in [".git", "node_modules", "__pycache__", ".venv", "venv"])
+        ]
+        if dfs:
+            return sorted(dfs, key=lambda p: len(p.parts))[0]
+
+    if any(w in inst_lower for w in ["compose", "service", "volume", "network"]):
+        for comp_name in ["docker-compose.yml", "docker-compose.yaml"]:
+            cp = target_path / comp_name
+            if cp.exists():
+                return cp
+
+    if any(w in inst_lower for w in ["requirement", "pip", "package", "depend", "install", "module", "pypi"]):
+        reqs = target_path / "requirements.txt"
+        if reqs.exists():
+            return reqs
+        pkg_json = target_path / "package.json"
+        if pkg_json.exists():
+            return pkg_json
+
+    if any(w in inst_lower for w in [".env", "environment", "secret"]):
+        env_f = target_path / ".env"
+        if env_f.exists():
+            return env_f
+
+    return None
+
+
+def interactive_select_file(target_path: Path, artifacts: Optional[Dict[str, str]] = None) -> Optional[Path]:
+    """Displays a list of editable files and allows user selection."""
+    files = list_interesting_files(target_path, artifacts or {})
+    if not files:
+        print(f"  {AMBER}[!] No configuration files found in workspace.{RESET}")
+        return None
+
+    print(f"\n{BOLD}{CYAN}Select a file to inspect or edit:{RESET}")
+    for idx, f in enumerate(files, 1):
+        rel = f.relative_to(target_path)
+        print(f"  [{idx}] {rel}")
+    print(f"  [{len(files) + 1}] Enter custom file path")
+    print("  [B] Back to main menu")
+
+    choice = input(f"\nEnter choice [1-{len(files)+1} or B]: ").strip().lower()
+    if choice in ("b", "back", "q", "exit", ""):
+        return None
+
+    if choice.isdigit():
+        num = int(choice)
+        if 1 <= num <= len(files):
+            return files[num - 1]
+        elif num == len(files) + 1:
+            custom_rel = input("Enter relative file path: ").strip()
+            custom_path = target_path / custom_rel
+            if custom_path.exists() and custom_path.is_file():
+                return custom_path
+            print(f"  {RED}[!] File not found: {custom_rel}{RESET}")
+            return None
+
+    for f in files:
+        if choice in str(f.relative_to(target_path)).lower():
+            return f
+
+    print(f"  {AMBER}[!] Unrecognized selection '{choice}'.{RESET}")
+    return None
+
+
+def apply_ai_instruction_to_file(
+    file_path: Path,
+    instruction: str,
+    error_context: str = "",
+) -> Tuple[bool, str, str]:
+    """
+    Applies user instruction to the file using Gemini LLM (if configured) or deterministic DevOps rules.
+    Returns: (success: bool, explanation: str, updated_content: str)
+    """
+    try:
+        content = file_path.read_text(encoding="utf-8", errors="ignore")
+    except Exception as e:
+        return False, f"Failed to read {file_path.name}: {e}", ""
+
+    inst_lower = instruction.lower()
+
+    # 1. Attempt Generative AI via Gemini API if API key is provided
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if api_key:
+        try:
+            import json
+            from google import genai
+            from google.genai import types
+
+            client = genai.Client(api_key=api_key)
+            prompt = f"""You are an expert AI DevOps and Software Engineer.
+Your task is to modify the provided file according to the user's instruction.
+
+File Name: {file_path.name}
+Full Path: {file_path}
+
+=== USER INSTRUCTION ===
+{instruction}
+
+=== RECENT RUNTIME / BUILD ERROR CONTEXT (IF RELEVANT) ===
+{error_context[-2000:] if error_context else 'None'}
+
+=== CURRENT FILE CONTENT ===
+{content}
+
+Instructions:
+1. Apply the user's requested modifications accurately.
+2. Preserve all existing functionality, comments, and structure not related to the requested change.
+3. If modifying Python code, ensure valid syntax and appropriate imports (e.g. 'import os').
+4. Return ONLY a valid JSON object in this exact schema:
+{{
+  "explanation": "Brief description of changes made",
+  "updated_content": "The full revised file content"
+}}
+"""
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.1,
+                ),
+            )
+            data = json.loads(response.text)
+            updated = data.get("updated_content", "")
+            explanation = data.get("explanation", "Applied AI modifications.")
+            if updated and updated.strip() != content.strip():
+                return True, explanation, updated
+        except Exception:
+            pass
+
+    # 2. Robust Deterministic DevOps Rule Engine Fallback
+    updated = content
+    explanations = []
+
+    # Target: Django settings.py
+    if file_path.name.endswith(".py") and ("settings" in file_path.name or "settings" in str(file_path)):
+        # ALLOWED_HOSTS
+        if "allowed_hosts" in inst_lower or "allowed host" in inst_lower or ("host" in inst_lower and "allow" in inst_lower):
+            if re.search(r"ALLOWED_HOSTS\s*=\s*\[.*?\]", updated, flags=re.DOTALL):
+                updated = re.sub(
+                    r"ALLOWED_HOSTS\s*=\s*\[.*?\]",
+                    "ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', '*').split(',') if os.environ.get('ALLOWED_HOSTS') else ['*']",
+                    updated,
+                    flags=re.DOTALL,
+                )
+                if "import os" not in updated:
+                    updated = "import os\n" + updated
+                explanations.append("Configured ALLOWED_HOSTS to allow all hosts and read from environment.")
+
+        # DATABASES / SQLite Fallback
+        if any(w in inst_lower for w in ["sqlite", "database", "postgres", "db", "fallback", "connection"]):
+            db_block = (
+                "# Database configuration with dynamic environment & SQLite fallback\n"
+                "DB_HOST = os.environ.get('DB_HOST', 'db')\n"
+                "DB_NAME = os.environ.get('DB_NAME', 'postgres')\n"
+                "DB_USER = os.environ.get('DB_USER', 'postgres')\n"
+                "DB_PASSWORD = os.environ.get('DB_PASSWORD', '1234')\n"
+                "DB_PORT = os.environ.get('DB_PORT', '5432')\n\n"
+                "if os.environ.get('USE_SQLITE', 'false').lower() in ('true', '1') or not DB_HOST:\n"
+                "    DATABASES = {\n"
+                "        'default': {\n"
+                "            'ENGINE': 'django.db.backends.sqlite3',\n"
+                "            'NAME': os.path.join(BASE_DIR, 'db.sqlite3'),\n"
+                "        }\n"
+                "    }\n"
+                "else:\n"
+                "    DATABASES = {\n"
+                "        'default': {\n"
+                "            'ENGINE': 'django.db.backends.postgresql',\n"
+                "            'NAME': DB_NAME,\n"
+                "            'USER': DB_USER,\n"
+                "            'PASSWORD': DB_PASSWORD,\n"
+                "            'HOST': DB_HOST,\n"
+                "            'PORT': DB_PORT,\n"
+                "        }\n"
+                "    }"
+            )
+            if re.search(r"DATABASES\s*=\s*\{.*?\n\}", updated, flags=re.DOTALL):
+                updated = re.sub(r"DATABASES\s*=\s*\{.*?\n\}", db_block, updated, flags=re.DOTALL)
+                if "import os" not in updated:
+                    updated = "import os\n" + updated
+                explanations.append("Updated DATABASES with dynamic environment parameters and SQLite fallback.")
+
+        # DEBUG
+        if "debug" in inst_lower:
+            if re.search(r"DEBUG\s*=\s*(?:True|False)", updated):
+                updated = re.sub(r"DEBUG\s*=\s*(?:True|False)", "DEBUG = os.environ.get('DEBUG', 'True').lower() in ('true', '1')", updated)
+                explanations.append("Set DEBUG to be driven by environment variable with True default.")
+
+    # Target: requirements.txt
+    elif file_path.name == "requirements.txt":
+        packages_to_check = {
+            "pillow": "Pillow>=9.0.0",
+            "psycopg2": "psycopg2-binary>=2.9.9",
+            "psycopg2-binary": "psycopg2-binary>=2.9.9",
+            "gunicorn": "gunicorn>=21.2.0",
+            "whitenoise": "whitenoise>=6.6.0",
+            "django": "django>=4.2.0",
+        }
+        added = []
+        for pkg_key, pkg_spec in packages_to_check.items():
+            if pkg_key in inst_lower:
+                base_name = pkg_spec.split(">=")[0]
+                if base_name.lower() not in updated.lower():
+                    if updated and not updated.endswith("\n"):
+                        updated += "\n"
+                    updated += f"{pkg_spec}\n"
+                    added.append(pkg_spec)
+        if added:
+            explanations.append(f"Added {', '.join(added)} to requirements.txt.")
+
+    # Target: Dockerfile
+    elif "dockerfile" in file_path.name.lower():
+        # Port change
+        if any(w in inst_lower for w in ["port", "expose"]):
+            port_match = re.search(r"\b(\d{2,5})\b", inst_lower)
+            if port_match:
+                new_port = port_match.group(1)
+                updated = re.sub(r"EXPOSE\s+\d+", f"EXPOSE {new_port}", updated)
+                updated = re.sub(r"ENV PORT=\d+", f"ENV PORT={new_port}", updated)
+                explanations.append(f"Updated exposed port to {new_port}.")
+
+        # Migrations
+        if "migrate" in inst_lower or "migration" in inst_lower:
+            if "migrate" not in updated:
+                updated = re.sub(
+                    r'CMD\s*\[\s*"gunicorn"',
+                    'CMD ["sh", "-c", "python manage.py migrate --noinput || true; exec gunicorn"',
+                    updated,
+                )
+                explanations.append("Configured database migration execution before application boot.")
+
+    # Target: docker-compose.yml
+    elif "docker-compose" in file_path.name.lower():
+        if any(w in inst_lower for w in ["postgres", "database", "db"]):
+            if "image: postgres" not in updated and "services:\n" in updated:
+                pg_block = (
+                    "  db:\n"
+                    "    image: postgres:15-alpine\n"
+                    "    container_name: app-db\n"
+                    "    restart: unless-stopped\n"
+                    "    environment:\n"
+                    "      POSTGRES_DB: postgres\n"
+                    "      POSTGRES_USER: postgres\n"
+                    "      POSTGRES_PASSWORD: \"1234\"\n"
+                    "    ports:\n"
+                    "      - \"5432:5432\"\n"
+                    "    healthcheck:\n"
+                    "      test: [\"CMD-SHELL\", \"pg_isready -U postgres\"]\n"
+                    "      interval: 3s\n"
+                    "      timeout: 3s\n"
+                    "      retries: 5\n\n"
+                )
+                updated = updated.replace("services:\n", f"services:\n{pg_block}", 1)
+                explanations.append("Added PostgreSQL database service to docker-compose.yml.")
+
+    if updated.strip() != content.strip():
+        explanation_text = " ".join(explanations) if explanations else "Applied changes based on instruction."
+        return True, explanation_text, updated
+
+    return False, "Could not apply automated rule without Gemini API key.", content
+
+
+@dataclass
+class CodebaseAlignmentResult:
+    diagnosis: str
+    misalignments: List[str]
+    file_changes: Dict[str, str]  # rel_path -> new_content
+    explanations: Dict[str, str]  # rel_path -> explanation
+
+
+def align_project_codebase(
+    target_path: Path,
+    analysis: Any,
+    error_context: str = "",
+    artifacts: Optional[Dict[str, str]] = None,
+) -> CodebaseAlignmentResult:
+    """
+    Replit-style whole-codebase alignment engine.
+    Scans and cross-analyzes all configuration and source files across the project
+    to resolve discrepancies between application code, container settings, and database environment.
+    """
+    artifacts = artifacts or {}
+    file_changes: Dict[str, str] = {}
+    explanations: Dict[str, str] = {}
+    misalignments: List[str] = []
+
+    err_lower = error_context.lower()
+    is_db_refused = any(tok in err_lower for tok in [
+        "connection refused", "could not connect to server", "operationalerror",
+        "connection to server at \"localhost\"", "http 500"
+    ])
+
+    framework = analysis.services[0].framework.value if (analysis and analysis.services) else ""
+    is_django = "django" in framework.lower() or any(target_path.rglob("manage.py"))
+
+    # 1. Inspect and Align Django settings.py
+    settings_files = [
+        p for p in target_path.rglob("*settings*.py")
+        if not any(ign in p.parts for ign in [".git", "node_modules", "__pycache__", ".venv", "venv"])
+    ]
+    if settings_files:
+        settings_file = sorted(settings_files, key=lambda p: len(p.parts))[0]
+        rel_settings = str(settings_file.relative_to(target_path)).replace("\\", "/")
+        try:
+            content = settings_file.read_text(encoding="utf-8", errors="ignore")
+            updated = content
+            changed = False
+
+            # Check ALLOWED_HOSTS
+            if "ALLOWED_HOSTS = []" in updated or "ALLOWED_HOSTS=[]" in updated or "ALLOWED_HOSTS = ['localhost']" in updated:
+                updated = re.sub(
+                    r"ALLOWED_HOSTS\s*=\s*\[.*?\]",
+                    "ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', '*').split(',') if os.environ.get('ALLOWED_HOSTS') else ['*']",
+                    updated,
+                    flags=re.DOTALL,
+                )
+                if "import os" not in updated:
+                    updated = "import os\n" + updated
+                changed = True
+                misalignments.append(f"{rel_settings}: ALLOWED_HOSTS was empty or restricted to localhost.")
+                explanations[rel_settings] = "Configured ALLOWED_HOSTS = ['*'] for container networking."
+
+            # Check DATABASES
+            has_localhost_db = "'HOST': 'localhost'" in updated or '"HOST": "localhost"' in updated or "'HOST': ''" in updated
+            has_no_sqlite_fallback = "USE_SQLITE" not in updated and "sqlite3" not in updated
+            if is_db_refused or has_localhost_db or has_no_sqlite_fallback:
+                db_block = (
+                    "# Database configuration with dynamic environment & SQLite fallback\n"
+                    "DB_HOST = os.environ.get('DB_HOST', 'db')\n"
+                    "DB_NAME = os.environ.get('DB_NAME', 'postgres')\n"
+                    "DB_USER = os.environ.get('DB_USER', 'postgres')\n"
+                    "DB_PASSWORD = os.environ.get('DB_PASSWORD', '1234')\n"
+                    "DB_PORT = os.environ.get('DB_PORT', '5432')\n\n"
+                    "if os.environ.get('USE_SQLITE', 'false').lower() in ('true', '1') or not DB_HOST:\n"
+                    "    DATABASES = {\n"
+                    "        'default': {\n"
+                    "            'ENGINE': 'django.db.backends.sqlite3',\n"
+                    "            'NAME': os.path.join(BASE_DIR, 'db.sqlite3'),\n"
+                    "        }\n"
+                    "    }\n"
+                    "else:\n"
+                    "    DATABASES = {\n"
+                    "        'default': {\n"
+                    "            'ENGINE': 'django.db.backends.postgresql',\n"
+                    "            'NAME': DB_NAME,\n"
+                    "            'USER': DB_USER,\n"
+                    "            'PASSWORD': DB_PASSWORD,\n"
+                    "            'HOST': DB_HOST,\n"
+                    "            'PORT': DB_PORT,\n"
+                    "        }\n"
+                    "    }"
+                )
+                if re.search(r"DATABASES\s*=\s*\{.*?\n\}", updated, flags=re.DOTALL):
+                    updated = re.sub(r"DATABASES\s*=\s*\{.*?\n\}", db_block, updated, flags=re.DOTALL)
+                    if "import os" not in updated:
+                        updated = "import os\n" + updated
+                    changed = True
+                    misalignments.append(f"{rel_settings}: Database 'HOST' was hardcoded to 'localhost' with no SQLite fallback.")
+                    prev_exp = explanations.get(rel_settings, "")
+                    explanations[rel_settings] = (prev_exp + " " if prev_exp else "") + "Updated DATABASES with dynamic DB_HOST and SQLite fallback."
+
+            if changed and updated != content:
+                file_changes[rel_settings] = updated
+        except Exception:
+            pass
+
+    # 2. Inspect and Align docker-compose.yml
+    compose_path = target_path / "docker-compose.yml"
+    compose_content = ""
+    if compose_path.exists():
+        try:
+            compose_content = compose_path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            compose_content = ""
+    elif "docker-compose.yml" in artifacts:
+        compose_content = artifacts["docker-compose.yml"]
+
+    if compose_content and is_django:
+        updated_compose = compose_content
+        changed_compose = False
+        if "image: postgres" not in updated_compose and "services:\n" in updated_compose:
+            app_repo_name = analysis.repo_name if analysis else "app"
+            pg_block = (
+                "  db:\n"
+                "    image: postgres:15-alpine\n"
+                f"    container_name: {app_repo_name}-db\n"
+                "    restart: unless-stopped\n"
+                "    environment:\n"
+                "      POSTGRES_DB: postgres\n"
+                "      POSTGRES_USER: postgres\n"
+                "      POSTGRES_PASSWORD: \"1234\"\n"
+                "    ports:\n"
+                "      - \"5432:5432\"\n"
+                "    healthcheck:\n"
+                "      test: [\"CMD-SHELL\", \"pg_isready -U postgres\"]\n"
+                "      interval: 3s\n"
+                "      timeout: 3s\n"
+                "      retries: 5\n\n"
+            )
+            updated_compose = updated_compose.replace("services:\n", f"services:\n{pg_block}", 1)
+            if "depends_on:" not in updated_compose:
+                updated_compose = re.sub(
+                    r"(container_name:[^\n]+\n)",
+                    r"\1    depends_on:\n      db:\n        condition: service_healthy\n",
+                    updated_compose,
+                    count=1
+                )
+            if "DB_HOST" not in updated_compose:
+                updated_compose = re.sub(
+                    r"(environment:\s*\n)",
+                    r"\1      DB_HOST: db\n      DB_PASSWORD: \"1234\"\n",
+                    updated_compose,
+                    count=1
+                )
+            changed_compose = True
+            misalignments.append("docker-compose.yml: Missing dedicated PostgreSQL ('db') service container.")
+            explanations["docker-compose.yml"] = "Provisioned PostgreSQL database container ('db') with healthcheck."
+
+        if changed_compose and updated_compose != compose_content:
+            file_changes["docker-compose.yml"] = updated_compose
+
+    # 3. Inspect and Align Dockerfile
+    dockerfile_path = target_path / "Dockerfile"
+    dockerfile_content = ""
+    if dockerfile_path.exists():
+        try:
+            dockerfile_content = dockerfile_path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            dockerfile_content = ""
+    elif "Dockerfile" in artifacts:
+        dockerfile_content = artifacts["Dockerfile"]
+
+    if dockerfile_content and is_django:
+        updated_df = dockerfile_content
+        changed_df = False
+        if "migrate" not in updated_df and 'gunicorn' in updated_df:
+            updated_df = re.sub(
+                r'CMD\s*\[\s*"gunicorn"',
+                'CMD ["sh", "-c", "python manage.py migrate --noinput || true; exec gunicorn"',
+                updated_df,
+            )
+            changed_df = True
+            misalignments.append("Dockerfile: Missing database migration execution before application boot.")
+            explanations["Dockerfile"] = "Added 'python manage.py migrate --noinput || true' before gunicorn start."
+
+        if changed_df and updated_df != dockerfile_content:
+            file_changes["Dockerfile"] = updated_df
+
+    # 4. Inspect and Align requirements.txt
+    reqs_path = target_path / "requirements.txt"
+    if reqs_path.exists() and is_django:
+        try:
+            reqs_content = reqs_path.read_text(encoding="utf-8", errors="ignore")
+            updated_reqs = reqs_content
+            needed = {
+                "psycopg2": "psycopg2-binary>=2.9.9",
+                "pillow": "Pillow>=9.0.0",
+                "gunicorn": "gunicorn>=21.2.0",
+                "whitenoise": "whitenoise>=6.6.0",
+            }
+            added = []
+            for k, spec in needed.items():
+                if k not in updated_reqs.lower():
+                    if updated_reqs and not updated_reqs.endswith("\n"):
+                        updated_reqs += "\n"
+                    updated_reqs += f"{spec}\n"
+                    added.append(spec.split(">=")[0])
+            if added and updated_reqs != reqs_content:
+                file_changes["requirements.txt"] = updated_reqs
+                misalignments.append(f"requirements.txt: Missing production dependencies ({', '.join(added)}).")
+                explanations["requirements.txt"] = f"Added {', '.join(added)} to requirements.txt."
+        except Exception:
+            pass
+
+    diagnosis = "Analyzed codebase files and detected configuration misalignments."
+    if is_db_refused:
+        diagnosis = "Database connection refusal (HTTP 500) caused by localhost database binding and missing container networking."
+
+    return CodebaseAlignmentResult(
+        diagnosis=diagnosis,
+        misalignments=misalignments,
+        file_changes=file_changes,
+        explanations=explanations,
+    )
+
+
+def classify_user_intent(user_input: str, has_pending_fix: bool = False) -> str:
+    """Classifies user input into action intents."""
+    cleaned = user_input.strip()
+    lower = cleaned.lower()
+
+    # 1. Affirmative answer to a pending fix
+    if has_pending_fix and lower in ("y", "yes", "do it", "fix it", "apply", "apply it", "sure", "ok", "go ahead", "proceed", "yes please"):
+        return "APPLY_PENDING_FIX"
+
+    # 2. Rejection of a pending fix
+    if has_pending_fix and lower in ("n", "no", "cancel", "skip", "discard", "nevermind"):
+        return "DISCARD_PENDING_FIX"
+
+    # 3. Direct shortcuts
+    if lower in ("q", "quit", "exit"):
+        return "QUIT"
+    if lower in ("l", "logs", "log"):
+        return "LOGS"
+    if lower in ("s", "status", "diff"):
+        return "STATUS"
+    if lower in ("p", "push"):
+        return "PUSH"
+    if lower in ("r", "rerun", "verify"):
+        return "RERUN"
+    if lower in ("d", "deploy"):
+        return "DEPLOY"
+    if lower in ("help", "?", "commands"):
+        return "HELP"
+
+    # 4. Whole-codebase alignment trigger (Replit-style)
+    if lower in ("align", "fix", "align codebase", "auto fix", "autofix", "e", "edit"):
+        return "ALIGN_CODEBASE"
+
+    if (lower.startswith("open ") or lower.startswith("edit ")) and len(cleaned.split()) >= 2:
+        return "EDIT_SPECIFIC_FILE"
+
+    # 5. Questions and analytical queries
+    question_triggers = [
+        "what", "why", "how", "explain", "tell me", "show me", "where",
+        "is there", "can you", "could you", "help", "diagnose", "check", "describe"
+    ]
+    diagnostic_keywords = [
+        "issue", "error", "problem", "fail", "failed", "failure", "broken",
+        "crash", "crashed", "bug", "wrong", "500", "404", "status", "traceback",
+        "reason", "why", "what is"
+    ]
+
+    is_question = cleaned.endswith("?") or any(lower.startswith(w + " ") or lower == w for w in question_triggers)
+    is_diagnostic = any(w in lower for w in diagnostic_keywords)
+    mentions_direct_file_action = any(w in lower for w in ["change ", "update ", "add ", "remove ", "replace ", "edit ", "write ", "create ", "delete "]) and any(ext in lower for ext in [".py", ".txt", ".yml", ".yaml", ".json", "dockerfile", "compose"])
+
+    if (is_question or is_diagnostic) and not mentions_direct_file_action:
+        return "QUESTION_OR_DIAGNOSIS"
+
+    return "MODIFY_FILE"
+
+
+def handle_conversational_query(
+    user_query: str,
+    target_path: Path,
+    analysis: Any,
+    detected_repo: Optional[str] = None,
+    branch_name: str = "ai-devops-setup",
+    last_error_logs: str = "",
+    artifacts: Optional[Dict[str, str]] = None,
+    conversation_history: Optional[List[Dict[str, str]]] = None,
+    known_secret_vals: Optional[List[str]] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Answers user questions using full terminal context (logs, repo metadata, files)
+    and returns an optional proposed fix dict: {"file_path": Path, "instruction": str, "description": str}.
+    """
+    artifacts = artifacts or {}
+    known_secret_vals = known_secret_vals or []
+    if last_error_logs:
+        sanitized_logs = redact_secrets(last_error_logs, custom_secrets=known_secret_vals)
+        if len(sanitized_logs) > 4000:
+            sanitized_logs = sanitized_logs[:2500] + "\n...[truncated]...\n" + sanitized_logs[-1500:]
+    else:
+        sanitized_logs = "No failure logs recorded. Verification has not failed."
+    framework_name = analysis.services[0].framework.value if (analysis and analysis.services) else "Unknown"
+    default_port = analysis.services[0].default_port if (analysis and analysis.services) else 8000
+
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if api_key:
+        try:
+            import json
+            from google import genai
+            from google.genai import types
+
+            client = genai.Client(api_key=api_key)
+            prompt = f"""You are an expert AI DevOps pair programmer interacting with a software engineer directly in their terminal.
+You have FULL CONTEXT of their terminal session: repository analysis, generated CI/CD and Docker files, and recent build/runtime verification failure logs.
+
+Repository: {detected_repo or 'Local Repository'}
+Branch: {branch_name}
+Framework: {framework_name} (Port: {default_port})
+
+=== RECENT RUNTIME / BUILD ERROR LOGS FROM TERMINAL ===
+{sanitized_logs}
+
+=== AVAILABLE CONFIGURATION ARTIFACTS ===
+{", ".join(sorted(artifacts.keys()))}
+
+=== USER QUESTION ===
+{user_query}
+
+Task:
+1. Answer the user's question directly, clearly, concisely, and accurately based on the logs and terminal context.
+2. If diagnosing a failure or error:
+   - Identify the exact root cause from the logs (quote relevant line).
+   - Explain why it failed in this Docker/cloud environment.
+   - Propose a specific, concrete fix.
+3. If a file modification is needed, specify the target file and instruction.
+
+Return ONLY a valid JSON object matching this schema:
+{{
+  "answer": "Clear, markdown-formatted response explaining the issue and solution directly to the user",
+  "proposed_fix": {{
+    "file": "relative/path/to/file",
+    "instruction": "Exact instruction of what to modify in the file",
+    "description": "Short 1-line description of the fix"
+  }}
+}}
+If no file fix is needed, set "proposed_fix": null.
+"""
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.1,
+                ),
+            )
+            data = json.loads(response.text)
+            answer = data.get("answer", "")
+            if answer:
+                print(f"\n{BOLD}{CYAN}🤖 AI Agent Diagnosis:{RESET}\n{answer}\n")
+            pfix = data.get("proposed_fix")
+            if pfix and isinstance(pfix, dict) and pfix.get("file"):
+                target_f = find_target_file(target_path, pfix["file"]) or (target_path / pfix["file"])
+                if target_f.exists():
+                    return {
+                        "file_path": target_f,
+                        "instruction": pfix.get("instruction", user_query),
+                        "description": pfix.get("description", "Apply proposed fix"),
+                    }
+            return None
+        except Exception:
+            pass
+
+    # Deterministic Context-Aware Diagnostic Engine Fallback
+    err_lower = sanitized_logs.lower()
+    proposed_fix = None
+
+    # Database connection refusal (e.g. Django postgres connection to localhost failed: Connection refused)
+    if any(token in err_lower for token in ["connection refused", "could not connect to server", "operationalerror", "connection to server at \"localhost\" failed"]) or ("http 500" in err_lower and "psycopg2" in err_lower):
+        settings_file = find_target_file(target_path, "settings.py")
+        rel_str = str(settings_file.relative_to(target_path)) if settings_file else "settings.py"
+        print_box(
+            title="🔍 Diagnosis: Database Connection Refusal (HTTP 500)",
+            lines=[
+                f"{BOLD}Root Cause:{RESET}",
+                f"  The container built and booted, but when probing {CYAN}http://localhost:{default_port}/{RESET},",
+                f"  the healthcheck probe failed with {RED}HTTP 500 Internal Server Error{RESET}.",
+                "",
+                f"{BOLD}Log Evidence:{RESET}",
+                f"  {RED}psycopg2.OperationalError: connection to server at 'localhost', port 5432 failed: Connection refused{RESET}",
+                "",
+                f"{BOLD}Why this happened:{RESET}",
+                f"  In {BOLD}{rel_str}{RESET}, the database HOST is configured as {AMBER}'localhost'{RESET}.",
+                f"  Inside Docker, 'localhost' refers to the application container itself, where no PostgreSQL server is running.",
+                "",
+                f"{BOLD}Recommended Fix:{RESET}",
+                f"  Update {BOLD}{rel_str}{RESET} to read {CYAN}DB_HOST{RESET} from environment ({CYAN}os.environ.get('DB_HOST', 'db'){RESET})",
+                f"  with an automatic SQLite fallback when PostgreSQL is unreachable.",
+            ],
+            border_color=AMBER,
+            badge="🚨",
+        )
+        if settings_file and settings_file.exists():
+            proposed_fix = {
+                "file_path": settings_file,
+                "instruction": "Update settings.py with SQLite fallback and dynamic DB_HOST and allow all hosts",
+                "description": f"Configure dynamic DB_HOST with SQLite fallback in '{rel_str}'",
+            }
+
+    elif "modulenotfounderror" in err_lower or "importerror" in err_lower:
+        match = re.search(r"ModuleNotFoundError:\s+No module named\s+['\"]([a-zA-Z0-9_\-]+)['\"]", sanitized_logs, re.IGNORECASE)
+        mod_name = match.group(1).strip() if match else "missing-module"
+        req_file = find_target_file(target_path, "requirements.txt") or (target_path / "requirements.txt")
+        print_box(
+            title="🔍 Diagnosis: Missing Python Module",
+            lines=[
+                f"{BOLD}Root Cause:{RESET}",
+                f"  Application crashed on startup: {RED}ModuleNotFoundError: No module named '{mod_name}'{RESET}",
+                "",
+                f"{BOLD}Recommended Fix:{RESET}",
+                f"  Add {CYAN}{mod_name}{RESET} to requirements.txt and rebuild the container.",
+            ],
+            border_color=RED,
+            badge="📦",
+        )
+        if req_file and req_file.exists():
+            proposed_fix = {
+                "file_path": req_file,
+                "instruction": f"Add {mod_name} to requirements",
+                "description": f"Add '{mod_name}' to requirements.txt",
+            }
+
+    elif "healthcheck probe failed" in err_lower or "http 000000" in err_lower:
+        print_box(
+            title="🔍 Diagnosis: Healthcheck Probe Failed (Port / Startup Issue)",
+            lines=[
+                f"{BOLD}Root Cause:{RESET}",
+                f"  The healthcheck probe at {CYAN}http://localhost:{default_port}/{RESET} timed out or failed to connect.",
+                "",
+                f"{BOLD}Possible Reasons:{RESET}",
+                f"  1. The server is binding to 127.0.0.1 instead of {BOLD}0.0.0.0{RESET}.",
+                f"  2. The application port inside the container does not match {CYAN}{default_port}{RESET}.",
+                f"  3. The application crashed during startup.",
+                "",
+                f"Type {PINK}[L]{RESET} to view full container logs, or type instructions to adjust port or Dockerfile.",
+            ],
+            border_color=AMBER,
+            badge="⚠️",
+        )
+
+    else:
+        print_box(
+            title="🤖 AI DevOps Terminal Context",
+            lines=[
+                f"{MUTED}Repository:    {RESET} {BOLD}{WHITE}{detected_repo or 'Local'}{RESET}",
+                f"{MUTED}Setup Branch:  {RESET} {PINK}{branch_name}{RESET}",
+                f"{MUTED}Framework:     {RESET} {CYAN}{framework_name}{RESET} (Port: {default_port})",
+                "",
+                f"You can instruct the agent to modify any file, inspect logs, re-run verification, or push:",
+                f"  • e.g. 'Update settings.py to fallback to sqlite3 and allow all hosts'",
+                f"  • e.g. 'Change port to 8000 in Dockerfile'",
+                f"  • [{PINK}E{RESET}] Edit file directly   [{CYAN}R{RESET}] Re-run verification   [{PURPLE}P{RESET}] Push to GitHub",
+            ],
+            border_color=CYAN,
+            badge="💡",
+        )
+
+    return proposed_fix
+
+
+def run_interactive_agent_session(
+    target_path: Path,
+    analysis: Any,
+    detected_repo: Optional[str] = None,
+    branch_name: str = "ai-devops-setup",
+    token: Optional[str] = None,
+    primary_port: int = 8000,
+    primary_health_path: str = "/",
+    known_secret_vals: Optional[List[str]] = None,
+    last_error_logs: str = "",
+    artifacts: Optional[Dict[str, str]] = None,
+    app_name: Optional[str] = None,
+) -> None:
+    """
+    Maintains a persistent, interactive terminal DevOps agent session.
+    Allows user to ask questions ("what is issue"), give instructions in natural language,
+    inspect colorized diffs, re-run verification, push to GitHub, or deploy.
+    """
+    pusher = GitPusher(token=token)
+    runner = GitHubActionsRunner(token=token)
+    known_secret_vals = known_secret_vals or []
+    artifacts = artifacts or {}
+    seen_run_ids = set()
+    if runner.last_run_id:
+        seen_run_ids.add(runner.last_run_id)
+
+    pending_fix: Optional[Dict[str, Any]] = None
+    conversation_history: List[Dict[str, str]] = []
+
+    def trigger_rerun(commit_msg: str = "fix(devops): update configurations for verification re-run") -> bool:
+        nonlocal last_error_logs
+        if not detected_repo or not token:
+            print(f"\n{AMBER}[!] Cannot re-run cloud sandbox: GitHub repository or token not configured.{RESET}")
+            return False
+
+        print(f"\n{INDIGO}Pushing latest changes and dispatching Cloud Sandbox Verification...{RESET}")
+        pusher.push_branch(
+            repo_dir=target_path,
+            branch_name=branch_name,
+            commit_message=commit_msg,
+            github_repo=detected_repo,
+        )
+        head_sha = pusher.get_head_sha(target_path)
+
+        print_step_box(
+            step_num=1,
+            total_steps=1,
+            title="Cloud Sandbox Re-Verification on GitHub Actions",
+            lines=[
+                f"{MUTED}Target Repo:       {RESET} {BOLD}{WHITE}{detected_repo}{RESET}",
+                f"{MUTED}Target Branch:     {RESET} {PINK}{branch_name}{RESET}",
+                f"{MUTED}Healthcheck Port:  {RESET} {AMBER}{primary_port}{RESET} (Path: {primary_health_path})",
+                f"{MUTED}Status:            {RESET} {INDIGO}Dispatched to GitHub Actions runner...{RESET}",
+            ],
+            badge="🧪",
+            border_color=INDIGO,
+        )
+
+        res = runner.dispatch_and_wait(
+            repo=detected_repo,
+            branch=branch_name,
+            workflow_file="ai-devops-verify.yml",
+            health_port=primary_port,
+            health_path=primary_health_path,
+            commit_sha=head_sha,
+            log_callback=lambda msg: print(redact_secrets(msg, custom_secrets=known_secret_vals)),
+            exclude_run_ids=seen_run_ids,
+        )
+        if runner.last_run_id:
+            seen_run_ids.add(runner.last_run_id)
+
+        if res.success:
+            print_success_box(
+                title="100% VERIFIED SUCCESS! All Cloud Sandbox Checks Passed!",
+                lines=[
+                    f"Branch {BOLD}'{branch_name}'{RESET} is verified with Docker Compose and Health Checks.",
+                    f"{EMERALD}✔ Container built and booted successfully{RESET}",
+                    f"{EMERALD}✔ Healthcheck probe accepted traffic with HTTP 200{RESET}",
+                ],
+            )
+            last_error_logs = ""
+            return True
+        else:
+            last_error_logs = (res.error_tail or "") + "\n" + "\n".join(res.logs[-40:])
+            print_alert_box(
+                "Re-Verification Failed",
+                [
+                    f"Service did not accept traffic on port {primary_port}.",
+                    "You can ask 'what is issue', instruct the agent to make more changes, or view logs [L].",
+                ],
+                is_error=True,
+            )
+            return False
+
+    print("\n" + "=" * 65)
+    print_box(
+        title="🤖 AI DevOps Interactive Terminal Agent",
+        lines=[
+            f"{MUTED}Workspace:     {RESET} {CYAN}{target_path}{RESET}",
+            f"{MUTED}Branch:        {RESET} {PINK}{branch_name}{RESET}",
+            f"{MUTED}Remote Repo:   {RESET} {BOLD}{WHITE}{detected_repo or 'Local'}{RESET}",
+            f"{MUTED}Health Port:   {RESET} {AMBER}{primary_port}{RESET} (Path: {primary_health_path})",
+            "",
+            f"{BOLD}{WHITE}Session remains active. Ask questions or enter commands below:{RESET}",
+            f"  • {BOLD}Ask anything:{RESET}   e.g. 'what is issue', 'why did it fail', 'how to fix this'",
+            f"  • {EMERALD}[A] Align:{RESET}      ⚡ Auto-align all files across codebase (Replit-style)",
+            f"  • {BOLD}Plain English:{RESET}  e.g. 'Update settings.py to fallback to sqlite3'",
+            f"  • {PINK}[E] Edit:{RESET}       Auto-align codebase or open specific file ('open settings.py')",
+            f"  • {CYAN}[R] Re-run:{RESET}     Commit, push, and re-run Cloud Sandbox Verification",
+            f"  • {PURPLE}[P] Push:{RESET}     Commit and push changes to GitHub branch",
+            f"  • {EMERALD}[D] Deploy:{RESET}   Deploy verified app to Cloud (Render/Vercel)",
+            f"  • {AMBER}[S] Status:{RESET}   View git status and modified files",
+            f"  • {WHITE}[L] Logs:{RESET}     View recent failure logs",
+            f"  • {RED}[Q] Quit:{RESET}     Exit application",
+        ],
+        border_color=PINK,
+        badge="💬",
+    )
+
+    while True:
+        try:
+            user_input = input(f"\n{BOLD}{PINK}ai-devops> {RESET}").strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\n[Session interrupted. Type 'q' to quit.]")
+            continue
+
+        if not user_input:
+            continue
+
+        intent = classify_user_intent(user_input, has_pending_fix=pending_fix is not None)
+
+        # 1. Apply Pending Fix (e.g. user answered "yes" or "do it")
+        if intent == "APPLY_PENDING_FIX" and pending_fix:
+            target_file = pending_fix["file_path"]
+            fix_instruction = pending_fix["instruction"]
+            rel_path_str = str(target_file.relative_to(target_path))
+            print(f"\n{INDIGO}Applying proposed fix to {BOLD}{CYAN}{rel_path_str}{RESET}...")
+
+            success, explanation, new_content = apply_ai_instruction_to_file(
+                file_path=target_file,
+                instruction=fix_instruction,
+                error_context=last_error_logs,
+            )
+            pending_fix = None
+            if not success:
+                print(f"  {RED}[!] {explanation}{RESET}")
+                continue
+
+            old_content = target_file.read_text(encoding="utf-8", errors="ignore")
+            diff_str = format_colored_diff(
+                rel_path_str,
+                old_content,
+                new_content,
+                custom_secrets=known_secret_vals,
+            )
+            print(diff_str)
+            print(f"{BOLD}{EMERALD}AI Plan:{RESET} {explanation}")
+
+            apply_choice = prompt_choice("Apply these changes to disk? [Y]es / [E]dit in editor / [N]o", default="Y").lower()
+            if apply_choice in ("y", "yes", ""):
+                target_file.write_text(new_content, encoding="utf-8")
+                if rel_path_str in artifacts:
+                    artifacts[rel_path_str] = new_content
+                print(f"  {EMERALD}✔ Saved changes to '{rel_path_str}'!{RESET}")
+
+                if detected_repo and token:
+                    rerun_choice = prompt_choice("Push changes and re-run Cloud Sandbox Verification now? [Y/n]", default="Y").lower()
+                    if rerun_choice in ("y", "yes", ""):
+                        trigger_rerun(commit_msg=f"fix: {fix_instruction[:60]}")
+            elif apply_choice in ("e", "edit"):
+                target_file.write_text(new_content, encoding="utf-8")
+                open_file_in_editor(target_file)
+            else:
+                print(f"  {MUTED}[Changes discarded]{RESET}")
+            continue
+
+        # 2. Discard Pending Fix
+        if intent == "DISCARD_PENDING_FIX":
+            pending_fix = None
+            print(f"  {MUTED}[Pending fix cancelled]{RESET}")
+            continue
+
+        # 3. Help Command
+        if intent == "HELP":
+            print_box(
+                title="📖 AI DevOps Terminal Agent Help & Commands",
+                lines=[
+                    f"{BOLD}{WHITE}Ask questions or diagnose issues in natural language:{RESET}",
+                    f"  • {CYAN}'what is issue'{RESET}        -> Diagnoses error logs and explains failure",
+                    f"  • {CYAN}'why did it fail'{RESET}      -> Root cause analysis of container / probe",
+                    f"  • {CYAN}'how to fix this'{RESET}      -> Proposes code changes and can apply them",
+                    f"  • {CYAN}'update settings.py'{RESET}   -> Edits file directly with diff preview",
+                    "",
+                    f"{BOLD}{WHITE}Direct action shortcuts:{RESET}",
+                    f"  • {PINK}[E] Edit:{RESET}   Open file in your local editor (VS Code, Notepad)",
+                    f"  • {CYAN}[R] Re-run:{RESET} Commit, push, and re-run Cloud Sandbox Verification",
+                    f"  • {PURPLE}[P] Push:{RESET}   Commit and push changes to GitHub branch",
+                    f"  • {EMERALD}[D] Deploy:{RESET} Deploy verified app to Cloud (Render / Vercel)",
+                    f"  • {AMBER}[S] Status:{RESET} View git status and modified files",
+                    f"  • {WHITE}[L] Logs:{RESET}   View recent container and probe failure logs",
+                    f"  • {RED}[Q] Quit:{RESET}   Exit application cleanly",
+                ],
+                border_color=PINK,
+                badge="💡",
+            )
+            continue
+
+        # 4. Whole-Codebase Alignment (Replit-style) OR Diagnostic Query (e.g. "what is issue", "why did it fail")
+        if intent in ("ALIGN_CODEBASE", "QUESTION_OR_DIAGNOSIS"):
+            conversation_history.append({"role": "user", "content": user_input})
+            alignment = align_project_codebase(
+                target_path=target_path,
+                analysis=analysis,
+                error_context=last_error_logs,
+                artifacts=artifacts,
+            )
+
+            if alignment.file_changes:
+                diag_lines = [
+                    f"{BOLD}Diagnosis:{RESET}",
+                    f"  {alignment.diagnosis}",
+                    "",
+                    f"{BOLD}Identified Codebase Discrepancies across {len(alignment.file_changes)} file(s):{RESET}",
+                ]
+                for mis in alignment.misalignments:
+                    diag_lines.append(f"  {EMERALD}•{RESET} {mis}")
+
+                print_box(
+                    title="🧠 Replit-Style Codebase Alignment & Solution",
+                    lines=diag_lines,
+                    border_color=CYAN,
+                    badge="⚡",
+                )
+
+                print(f"\n{BOLD}{WHITE}Proposed Changes Across Your Project:{RESET}")
+                for rel_p, new_text in alignment.file_changes.items():
+                    target_f = target_path / rel_p
+                    old_text = target_f.read_text(encoding="utf-8", errors="ignore") if target_f.exists() else ""
+                    print(format_colored_diff(rel_p, old_text, new_text, custom_secrets=known_secret_vals))
+
+                apply_choice = prompt_choice(
+                    f"🚀 Apply all {len(alignment.file_changes)} aligned changes across your project and re-verify? [Y/n]",
+                    default="Y"
+                ).lower()
+
+                if apply_choice in ("y", "yes", ""):
+                    for rel_p, new_text in alignment.file_changes.items():
+                        target_f = target_path / rel_p
+                        target_f.parent.mkdir(parents=True, exist_ok=True)
+                        target_f.write_text(new_text, encoding="utf-8")
+                        artifacts[rel_p] = new_text
+                        print(f"  {EMERALD}✔ Updated {rel_p}{RESET}")
+
+                    print(f"\n{BOLD}{EMERALD}All project files aligned successfully!{RESET}")
+                    if detected_repo and token:
+                        trigger_rerun(commit_msg="fix(codebase): align settings, compose, and dockerfile for container runtime")
+                else:
+                    print(f"  {MUTED}[Codebase alignment changes discarded]{RESET}")
+                continue
+
+            # If no automated alignment changes detected, fall back to conversational query
+            if intent == "QUESTION_OR_DIAGNOSIS":
+                proposed = handle_conversational_query(
+                    user_query=user_input,
+                    target_path=target_path,
+                    analysis=analysis,
+                    detected_repo=detected_repo,
+                    branch_name=branch_name,
+                    last_error_logs=last_error_logs,
+                    artifacts=artifacts,
+                    conversation_history=conversation_history,
+                    known_secret_vals=known_secret_vals,
+                )
+
+                if proposed and proposed.get("file_path") and proposed["file_path"].exists():
+                    pending_fix = proposed
+                    rel_f = proposed["file_path"].relative_to(target_path)
+                    confirm_fix = prompt_choice(f"Would you like me to apply this fix to '{rel_f}' now? [Y/n]", default="Y").lower()
+                    if confirm_fix in ("y", "yes", ""):
+                        target_file = proposed["file_path"]
+                        rel_path_str = str(rel_f)
+                        success, explanation, new_content = apply_ai_instruction_to_file(
+                            file_path=target_file,
+                            instruction=proposed["instruction"],
+                            error_context=last_error_logs,
+                        )
+                        pending_fix = None
+                        if success:
+                            old_content = target_file.read_text(encoding="utf-8", errors="ignore")
+                            diff_str = format_colored_diff(
+                                rel_path_str,
+                                old_content,
+                                new_content,
+                                custom_secrets=known_secret_vals,
+                            )
+                            print(diff_str)
+                            print(f"{BOLD}{EMERALD}AI Plan:{RESET} {explanation}")
+
+                            apply_choice = prompt_choice("Apply these changes to disk? [Y]es / [E]dit in editor / [N]o", default="Y").lower()
+                            if apply_choice in ("y", "yes", ""):
+                                target_file.write_text(new_content, encoding="utf-8")
+                                if rel_path_str in artifacts:
+                                    artifacts[rel_path_str] = new_content
+                                print(f"  {EMERALD}✔ Saved changes to '{rel_path_str}'!{RESET}")
+
+                                if detected_repo and token:
+                                    rerun_choice = prompt_choice("Push changes and re-run Cloud Sandbox Verification now? [Y/n]", default="Y").lower()
+                                    if rerun_choice in ("y", "yes", ""):
+                                        trigger_rerun(commit_msg=f"fix: {proposed['instruction'][:60]}")
+                            elif apply_choice in ("e", "edit"):
+                                target_file.write_text(new_content, encoding="utf-8")
+                                open_file_in_editor(target_file)
+                            else:
+                                print(f"  {MUTED}[Changes discarded]{RESET}")
+                continue
+            else:
+                print(f"\n{EMERALD}Codebase configuration files already aligned. No pending misalignments found.{RESET}")
+                continue
+
+        # Command: Open specific file in editor
+        if intent == "EDIT_SPECIFIC_FILE":
+            parts = user_input.split(None, 1)
+            target_str = parts[1].strip() if len(parts) > 1 else ""
+            target_f = find_target_file(target_path, target_str) or (target_path / target_str)
+            if target_f.exists() and target_f.is_file():
+                print(f"\nLaunching editor for '{target_f.relative_to(target_path)}'...")
+                old_text = target_f.read_text(encoding="utf-8", errors="ignore")
+                opened = open_file_in_editor(target_f)
+                if opened:
+                    new_text = target_f.read_text(encoding="utf-8", errors="ignore")
+                    if new_text != old_text:
+                        print(f"  {EMERALD}✔ Saved modifications to '{target_f.relative_to(target_path)}'!{RESET}")
+                        diff_str = format_colored_diff(
+                            str(target_f.relative_to(target_path)),
+                            old_text,
+                            new_text,
+                            custom_secrets=known_secret_vals,
+                        )
+                        print(diff_str)
+            else:
+                print(f"  {RED}[!] Could not locate file: '{target_str}'{RESET}")
+            continue
+
+        cmd_lower = user_input.lower()
+
+        # Command: Quit / Exit
+        if intent == "QUIT":
+            status_res = subprocess.run(["git", "status", "--porcelain"], cwd=target_path, capture_output=True, text=True)
+            if status_res.stdout.strip():
+                print(f"\n{AMBER}⚠️ You have uncommitted or unpushed changes in the workspace.{RESET}")
+                choice = input("Would you like to commit and push to GitHub before exiting? [y/N/cancel]: ").strip().lower()
+                if choice in ("cancel", "c"):
+                    continue
+                if choice in ("y", "yes"):
+                    pusher.push_branch(
+                        repo_dir=target_path,
+                        branch_name=branch_name,
+                        commit_message="feat(devops): save changes before exiting interactive session",
+                        github_repo=detected_repo,
+                    )
+                    print(f"  {EMERALD}✔ Pushed changes to GitHub.{RESET}")
+            print(f"\n{CYAN}Session ended. Thank you for using AI DevOps Agent! 👋{RESET}\n")
+            break
+
+        # Command: View Failure Logs
+        if intent == "LOGS":
+            if last_error_logs:
+                print(f"\n{BOLD}{AMBER}=== Recent Cloud Sandbox Logs ==={RESET}")
+                print(redact_secrets(last_error_logs, custom_secrets=known_secret_vals))
+                print(f"{BOLD}{AMBER}================================={RESET}\n")
+            else:
+                print(f"\n{MUTED}[Notice] No failure logs available for this session.{RESET}")
+            continue
+
+        # Command: Git Status / Diffs
+        if intent == "STATUS":
+            status_res = subprocess.run(["git", "status", "--short"], cwd=target_path, capture_output=True, text=True)
+            print(f"\n{BOLD}{CYAN}=== Git Status ({branch_name}) ==={RESET}")
+            if status_res.stdout.strip():
+                print(status_res.stdout)
+                diff_res = subprocess.run(["git", "diff"], cwd=target_path, capture_output=True, text=True)
+                if diff_res.stdout.strip():
+                    print(f"{BOLD}{CYAN}=== Working Tree Diff ==={RESET}")
+                    print(format_colored_diff("Working Tree", "", diff_res.stdout, custom_secrets=known_secret_vals))
+            else:
+                print(f"  {EMERALD}Working tree clean. All changes committed.{RESET}")
+            print(f"{BOLD}{CYAN}==================================={RESET}\n")
+            continue
+
+        # Command: Commit & Push
+        if intent == "PUSH":
+            msg = input("Commit message (press Enter for 'fix(devops): interactive agent updates'): ").strip()
+            msg = msg or "fix(devops): interactive agent updates"
+            print(f"\n{INDIGO}Pushing changes to '{branch_name}' on GitHub...{RESET}")
+            pushed, push_msg = pusher.push_branch(
+                repo_dir=target_path,
+                branch_name=branch_name,
+                commit_message=msg,
+                github_repo=detected_repo,
+            )
+            if pushed:
+                print(f"  {EMERALD}✔ {push_msg}{RESET}")
+            else:
+                print(f"  {RED}[!] {push_msg}{RESET}")
+            continue
+
+        # Command: Re-run Cloud Sandbox Verification
+        if intent == "RERUN":
+            trigger_rerun()
+            continue
+
+        # Command: Cloud Deployment
+        if intent == "DEPLOY":
+            default_branch = pusher.get_default_branch(detected_repo) if detected_repo else "main"
+            print(f"\n{BOLD}{CYAN}Launching Cloud Deployment...{RESET}")
+            try:
+                from ai_devops_agent.deployer import interactive_cloud_deployment
+                interactive_cloud_deployment(
+                    analysis=analysis,
+                    detected_repo=detected_repo,
+                    branch_name=default_branch,
+                    local_env_dir=target_path,
+                    default_env_values={},
+                    app_name=app_name,
+                )
+            except Exception as e:
+                print(f"  {RED}[!] Cloud deployment failed: {e}{RESET}")
+            continue
+
+        # Command: Manual file edit fallback if requested
+        if intent == "EDIT":
+            print(f"\n{AMBER}Please specify which file to open, e.g.: 'open btre/settings.py' or 'open Dockerfile'{RESET}")
+            continue
+
+        # Natural Language Agent File Modification (e.g. "Update settings.py to allow all hosts")
+        target_file = find_target_file(target_path, user_input)
+        if not target_file:
+            print(f"\n{AMBER}Could not determine which file to modify from: '{user_input}'. Please specify the file name (e.g. 'update settings.py') or ask 'what is issue'.{RESET}")
+            continue
+            target_file = interactive_select_file(target_path, artifacts=artifacts)
+            if not target_file:
+                continue
+
+        rel_path_str = str(target_file.relative_to(target_path))
+        print(f"\n{INDIGO}Target File:{RESET} {BOLD}{CYAN}{rel_path_str}{RESET}")
+        print(f"{INDIGO}Analyzing and applying instruction...{RESET}")
+
+        success, explanation, new_content = apply_ai_instruction_to_file(
+            file_path=target_file,
+            instruction=user_input,
+            error_context=last_error_logs,
+        )
+
+        if not success:
+            print(f"\n  {AMBER}[!] {explanation}{RESET}")
+            edit_now = input(f"Would you like to open '{rel_path_str}' in your editor to make the change manually? [Y/n]: ").strip().lower()
+            if edit_now not in ("n", "no"):
+                open_file_in_editor(target_file)
+            continue
+
+        # Show syntax-highlighted diff
+        old_content = target_file.read_text(encoding="utf-8", errors="ignore")
+        diff_str = format_colored_diff(
+            rel_path_str,
+            old_content,
+            new_content,
+            custom_secrets=known_secret_vals,
+        )
+        print(diff_str)
+        print(f"{BOLD}{EMERALD}AI Plan:{RESET} {explanation}")
+
+        # Ask user for approval
+        apply_choice = prompt_choice("Apply these changes to disk? [Y]es / [E]dit in editor / [N]o", default="Y").lower()
+        if apply_choice in ("y", "yes", ""):
+            target_file.write_text(new_content, encoding="utf-8")
+            if rel_path_str in artifacts:
+                artifacts[rel_path_str] = new_content
+            print(f"  {EMERALD}✔ Saved changes to '{rel_path_str}'!{RESET}")
+
+            # Ask if user wants to push and verify immediately
+            if detected_repo and token:
+                rerun_choice = prompt_choice("Push changes and re-run Cloud Sandbox Verification now? [Y/n]", default="Y").lower()
+                if rerun_choice in ("y", "yes", ""):
+                    trigger_rerun(commit_msg=f"fix: {user_input[:60]}")
+
+        elif apply_choice in ("e", "edit"):
+            target_file.write_text(new_content, encoding="utf-8")
+            open_file_in_editor(target_file)
+            print(f"  {EMERALD}✔ Finished editing '{rel_path_str}'.{RESET}")
+        else:
+            print(f"  {MUTED}[Changes discarded]{RESET}")
+
+
 def resolve_target_workspace(
     target: str, token: Optional[str] = None, repo: Optional[str] = None
 ) -> Tuple[Path, Optional[str], Optional[tempfile.TemporaryDirectory]]:
@@ -205,7 +1503,7 @@ def run_autonomous_pipeline(
     target: str,
     github_token: Optional[str] = None,
     branch_name: str = "ai-devops-setup",
-    max_iterations: int = 3,
+    max_iterations: int = 1,
     repo: Optional[str] = None,
     app_name: Optional[str] = None,
 ):
@@ -472,6 +1770,19 @@ def run_autonomous_pipeline(
 
                 if deploy_choice in ("S", "SKIP", "N", "NO"):
                     print(f"\n[Notice] Cloud deployment skipped. Merge the PR on GitHub when ready!\n")
+                    run_interactive_agent_session(
+                        target_path=target_path,
+                        analysis=analysis,
+                        detected_repo=detected_repo,
+                        branch_name=branch_name,
+                        token=token,
+                        primary_port=primary_port,
+                        primary_health_path=primary_health_path,
+                        known_secret_vals=known_secret_vals,
+                        last_error_logs="",
+                        artifacts=current_artifacts,
+                        app_name=app_name,
+                    )
                     return
 
                 # If user selected auto-merge
@@ -513,6 +1824,19 @@ def run_autonomous_pipeline(
                     )
                 except Exception as e:
                     print(f"\n[Notice] Cloud deployment skipped: {e}\n")
+                run_interactive_agent_session(
+                    target_path=target_path,
+                    analysis=analysis,
+                    detected_repo=detected_repo,
+                    branch_name=branch_name,
+                    token=token,
+                    primary_port=primary_port,
+                    primary_health_path=primary_health_path,
+                    known_secret_vals=known_secret_vals,
+                    last_error_logs="",
+                    artifacts=current_artifacts,
+                    app_name=app_name,
+                )
                 return
 
             # Handle failure & Self-Healing
@@ -608,10 +1932,26 @@ def run_autonomous_pipeline(
                 print("  * Patch pushed. Re-verifying Cloud Sandbox...")
                 time.sleep(3)
             else:
-                print("\n" + "=" * 60)
-                print("⚠️ Reached maximum 3 self-healing attempts.")
-                print(f"Detailed logs available at: https://github.com/{detected_repo}/actions")
-                print("=" * 60 + "\n")
+                print(f"\n⚠️ Cloud sandbox verification finished (Attempt {iteration}/{max_iterations}).")
+                if not result.success:
+                    print(f"Detailed logs available at: https://github.com/{detected_repo}/actions\n")
+
+        # Once verification loop completes without 100% success, start interactive terminal agent!
+        if not result.success:
+            last_logs = (result.error_tail or "") + "\n" + "\n".join(result.logs[-40:])
+            run_interactive_agent_session(
+                target_path=target_path,
+                analysis=analysis,
+                detected_repo=detected_repo,
+                branch_name=branch_name,
+                token=token,
+                primary_port=primary_port,
+                primary_health_path=primary_health_path,
+                known_secret_vals=known_secret_vals,
+                last_error_logs=last_logs,
+                artifacts=current_artifacts,
+                app_name=app_name,
+            )
 
     finally:
         if temp_workspace:

@@ -66,7 +66,7 @@ def main():
             target=target,
             github_token=token,
             branch_name="ai-devops-setup",
-            max_iterations=3,
+            max_iterations=1,
             repo=None,
             app_name=app_name,
         )
@@ -87,7 +87,7 @@ def main():
     auto_parser.add_argument("--branch", type=str, default="ai-devops-setup", help="Dedicated branch name to push")
     auto_parser.add_argument("--token", type=str, default=None, help="GitHub Personal Access Token")
     auto_parser.add_argument("--app-name", "--name", dest="app_name", type=str, default=None, help="Application / project name for cloud services")
-    auto_parser.add_argument("--retries", type=int, default=3, help="Max self-healing iterations (default: 3)")
+    auto_parser.add_argument("--retries", type=int, default=1, help="Max self-healing iterations (default: 1)")
 
     # 2. Inspect command
     inspect_parser = subparsers.add_parser("inspect", help="Inspect a repository and display analysis")
